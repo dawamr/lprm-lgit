@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lprm_core::LprmError;
+use lprm_core::{ChecksConfig, LprmError};
 use serde::Serialize;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -30,6 +30,18 @@ pub struct CheckResult {
     pub stderr_path: PathBuf,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct NamedCheckResult {
+    pub name: String,
+    pub result: CheckResult,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CheckSuiteResult {
+    pub passed: bool,
+    pub checks: Vec<NamedCheckResult>,
 }
 
 #[derive(Clone, Debug)]
@@ -160,6 +172,40 @@ impl CheckRunner {
             stderr_path,
             stdout_truncated: stdout.truncated,
             stderr_truncated: stderr.truncated,
+        })
+    }
+
+    /// Runs every configured required check in declared order against one working directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-argument error if a required check has no command, or forwards runner
+    /// errors when a command cannot be controlled or its logs cannot be persisted.
+    pub fn run_required(
+        &self,
+        checks: &ChecksConfig,
+        working_directory: &Path,
+        log_directory: &Path,
+    ) -> Result<CheckSuiteResult, LprmError> {
+        let timeout = Duration::from_secs(checks.timeout_seconds);
+        let mut results = Vec::with_capacity(checks.required.len());
+        for name in &checks.required {
+            let command = checks.commands.get(name).ok_or_else(|| {
+                LprmError::invalid_argument(format!(
+                    "Required check {name:?} has no configured command"
+                ))
+            })?;
+            results.push(NamedCheckResult {
+                name: name.clone(),
+                result: self.run(name, command, working_directory, log_directory, timeout)?,
+            });
+        }
+        let passed = results
+            .iter()
+            .all(|check| check.result.status == CheckStatus::Passed);
+        Ok(CheckSuiteResult {
+            passed,
+            checks: results,
         })
     }
 }

@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::{Duration, Instant};
 
+use lprm_core::ChecksConfig;
 use lprm_runner::{CheckRunner, CheckStatus};
 use tempfile::tempdir;
 
@@ -121,4 +123,78 @@ fn bounds_logs_and_passes_hostile_arguments_without_shell_evaluation() {
     assert!(literal.stdout_path.starts_with(fixture.path().join("logs")));
     assert!(bounded.stdout_truncated);
     assert_eq!(fs::metadata(bounded.stdout_path).unwrap().len(), 16);
+}
+
+#[test]
+fn required_check_suite_preserves_configured_order() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    fs::write(fixture.path().join("first.txt"), "first").unwrap();
+    fs::write(fixture.path().join("second.txt"), "second").unwrap();
+    let checks = ChecksConfig {
+        timeout_seconds: 2,
+        required: vec!["second".to_owned(), "first".to_owned()],
+        commands: BTreeMap::from([
+            (
+                "first".to_owned(),
+                command(&["/bin/test", "-f", "first.txt"]),
+            ),
+            (
+                "second".to_owned(),
+                command(&["/bin/test", "-f", "second.txt"]),
+            ),
+        ]),
+    };
+
+    let suite = CheckRunner::new(1024)
+        .unwrap()
+        .run_required(
+            &checks,
+            fixture.path(),
+            &fixture.path().join("required-logs"),
+        )
+        .expect("required checks should run");
+
+    assert_eq!(
+        suite
+            .checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect::<Vec<_>>(),
+        ["second", "first"]
+    );
+    assert!(suite.passed);
+}
+
+#[test]
+fn required_check_suite_blocks_when_any_check_fails() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    fs::write(fixture.path().join("present.txt"), "present").unwrap();
+    let checks = ChecksConfig {
+        timeout_seconds: 2,
+        required: vec!["present".to_owned(), "missing".to_owned()],
+        commands: BTreeMap::from([
+            (
+                "present".to_owned(),
+                command(&["/bin/test", "-f", "present.txt"]),
+            ),
+            (
+                "missing".to_owned(),
+                command(&["/bin/test", "-f", "missing.txt"]),
+            ),
+        ]),
+    };
+
+    let suite = CheckRunner::new(1024)
+        .unwrap()
+        .run_required(
+            &checks,
+            fixture.path(),
+            &fixture.path().join("required-logs"),
+        )
+        .expect("required checks should return a verdict");
+
+    assert!(!suite.passed);
+    assert_eq!(suite.checks.len(), 2);
+    assert_eq!(suite.checks[0].result.status, CheckStatus::Passed);
+    assert_eq!(suite.checks[1].result.status, CheckStatus::Failed);
 }
