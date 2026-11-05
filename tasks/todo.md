@@ -374,7 +374,7 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 
 ## Final release checkpoint
 
-- [ ] All PRD acceptance criteria AC-01 through AC-16 pass.
+- [x] All PRD acceptance criteria AC-01 through AC-16 pass on macOS ARM64 (index in T29; Linux pending CI).
 - [ ] Formatting, clippy, full locked tests, documentation smoke tests, and dependency advisory review pass.
-- [ ] Working tree is clean and atomic commits describe every delivered slice.
+- [x] Working tree is clean and atomic commits describe every delivered slice.
 - [ ] Human review approves release and tag creation.
