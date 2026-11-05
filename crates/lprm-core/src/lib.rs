@@ -3,6 +3,7 @@
 mod config;
 mod error;
 mod evidence;
+mod identity;
 mod output;
 mod pr;
 mod worktree;
@@ -13,6 +14,7 @@ pub use config::{
 };
 pub use error::{ErrorCode, LprmError};
 pub use evidence::{AdmissionGates, EvidenceFreshness, FingerprintInput, RevisionFingerprint};
+pub use identity::{AgentIdentity, require_role_separation};
 pub use output::{ApiError, Envelope, SCHEMA_VERSION};
 pub use pr::PullRequestStatus;
 pub use worktree::{WorktreeSpec, validate_managed_worktree_path};
