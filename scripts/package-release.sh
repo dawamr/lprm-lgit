@@ -24,10 +24,12 @@ cargo build --release --locked --target "$TARGET" -p lprm-cli
 
 STAGE="dist/stage/$NAME"
 rm -rf "dist/stage" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256"
-mkdir -p "$STAGE/docs/examples"
+mkdir -p "$STAGE/docs/examples" "$STAGE/scripts"
 cp "target/$TARGET/release/lprm" "$STAGE/lprm"
 cp README.md CHANGELOG.md "$STAGE/"
 cp docs/*.md "$STAGE/docs/"
+cp -R skills "$STAGE/skills"
+cp scripts/install-skills.sh "$STAGE/scripts/"
 cp docs/examples/lprm.sample.toml docs/examples/agent-workflow.sh "$STAGE/docs/examples/"
 printf 'version=%s\ntarget=%s\ncommit=%s\nsource_date_epoch=%s\n' \
     "$VERSION" "$TARGET" "$LPRM_BUILD_SHA" "$SOURCE_DATE_EPOCH" > "$STAGE/BUILD-INFO"

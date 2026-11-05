@@ -10,3 +10,4 @@ First release.
 - `pr sync`, `pr review`, `pr approve`, protected-path risk, an external reviewer adapter, and opt-in automatic admission.
 - Opt-in, bounded agent events.
 - Stable JSON envelope and exit codes 0 and 2 to 8.
+- Installable agent skills (`lprm-contributor`, `lprm-coordinator`, `lprm-recovery`) and `scripts/install-skills.sh`.

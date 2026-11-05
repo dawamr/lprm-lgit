@@ -56,6 +56,7 @@ for every command, and [docs/agent-workflows.md](docs/agent-workflows.md) for He
 | [docs/threat-model.md](docs/threat-model.md) | Trust boundaries and what LPRM does not protect |
 | [docs/runbook.md](docs/runbook.md) | Operating, recovering, and troubleshooting |
 | [docs/agent-workflows.md](docs/agent-workflows.md) | End-to-end Hermes and Codex examples |
+| [docs/skills.md](docs/skills.md) | Installable agent skills (`scripts/install-skills.sh`) |
 | [docs/examples/lprm.sample.toml](docs/examples/lprm.sample.toml) | Annotated sample configuration |
 | [docs/adr](docs/adr) | Architecture decisions |
 | [PRD_v1.0.md](PRD_v1.0.md) | Product requirements |

@@ -146,3 +146,49 @@ pub fn checkout_snapshot(repository: &Path) -> [String; 3] {
         git_stdout(repository, &["rev-parse", "HEAD"]),
     ]
 }
+
+/// Splits a documented command line on whitespace, honouring double quotes.
+pub fn split_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in line.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            ' ' if !quoted => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            other => current.push(other),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+/// Every `lprm ...` line inside a fenced `sh` block, with comments and placeholders resolved.
+pub fn shell_commands_in(text: &str) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut in_shell = false;
+    for line in text.lines() {
+        if line.starts_with("```") || line.trim_start().starts_with("```") {
+            in_shell = line.trim() == "```sh";
+            continue;
+        }
+        let line = line.trim();
+        if in_shell && line.starts_with("lprm ") {
+            let line = line.split(" #").next().unwrap();
+            let mut words = split_words(line);
+            for word in &mut words {
+                if word.starts_with('<') || word.starts_with('$') {
+                    "placeholder".clone_into(word);
+                }
+            }
+            commands.push(words);
+        }
+    }
+    commands
+}
