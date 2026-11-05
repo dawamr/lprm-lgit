@@ -91,6 +91,15 @@ impl LprmError {
         )
     }
 
+    pub fn busy(message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorCode::Busy,
+            message,
+            Value::Object(Map::default()),
+            true,
+        )
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(
             ErrorCode::Internal,

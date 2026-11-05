@@ -1,10 +1,13 @@
 //! SQLite persistence adapter for LPRM.
 
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt;
 use lprm_core::{AdmissionGates, LprmError, PullRequestStatus, RevisionFingerprint};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
@@ -147,6 +150,11 @@ pub struct Store {
     connection: Connection,
 }
 
+/// An exclusive OS advisory lock for one repository coordinator.
+pub struct RepositoryLock {
+    file: File,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateLayout {
     repository_id: String,
@@ -205,6 +213,13 @@ pub struct EnqueuePullRequest {
     pub gates: AdmissionGates,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartMergeAttempt {
+    pub attempt_id: String,
+    pub audit_id: String,
+    pub actor: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PullRequestRevisionRecord {
     pub id: String,
@@ -254,6 +269,30 @@ pub struct MergeQueueRecord {
     pub finished_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MergeAttemptRecord {
+    pub id: String,
+    pub repository_id: String,
+    pub queue_id: String,
+    pub pr_id: String,
+    pub revision_id: String,
+    pub target_before_sha: String,
+    pub source_sha: String,
+    pub candidate_commit_sha: Option<String>,
+    pub target_after_sha: Option<String>,
+    pub state: String,
+    pub error_code: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LockHolder<'a> {
+    pid: u32,
+    operation: &'a str,
+    acquired_unix_ms: u128,
+}
+
 struct QueueAdmissionRow {
     status: String,
     revision_id: String,
@@ -261,6 +300,15 @@ struct QueueAdmissionRow {
     target_sha: String,
     policy_hash: String,
     check_config_hash: String,
+}
+
+struct QueuedMergeRow {
+    queue_id: String,
+    pull_request_id: String,
+    revision_id: String,
+    status: String,
+    target_sha: String,
+    source_sha: String,
 }
 
 impl StateLayout {
@@ -317,6 +365,53 @@ impl StateLayout {
 
     pub fn lock_path(&self) -> &Path {
         self.lock_path.as_path()
+    }
+}
+
+impl RepositoryLock {
+    /// Acquires the repository coordinator lock within a bounded timeout.
+    ///
+    /// The lock file contents are diagnostic metadata only. Ownership is always determined by the
+    /// operating system lock, so callers must never delete this file based on metadata age.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BUSY` when another process retains the lock past `timeout`, or an internal error
+    /// when the lock file or holder metadata cannot be prepared.
+    pub fn acquire(path: &Path, timeout: Duration, operation: &str) -> Result<Self, LprmError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| persistence_error("create lock directory", error))?;
+        }
+        let mut file = open_lock_file(path)?;
+        let started = Instant::now();
+        loop {
+            match FileExt::try_lock_exclusive(&file) {
+                Ok(()) => break,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if started.elapsed() >= timeout {
+                        return Err(LprmError::busy(format!(
+                            "Repository coordinator lock is busy: {}",
+                            path.display()
+                        )));
+                    }
+                    thread::sleep(
+                        timeout
+                            .saturating_sub(started.elapsed())
+                            .min(Duration::from_millis(10)),
+                    );
+                }
+                Err(error) => return Err(persistence_error("acquire repository lock", error)),
+            }
+        }
+        write_lock_holder(&mut file, operation)?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for RepositoryLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -1059,6 +1154,94 @@ impl Store {
             .map_err(|error| persistence_error("read merge queue entry", error))
     }
 
+    /// Atomically claims the next queued PR and records its merge attempt.
+    ///
+    /// The caller must retain the matching [`RepositoryLock`] for the complete coordinator
+    /// operation. The database's active-attempt constraint is an additional safety boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BUSY` if the repository already has an active attempt, a validation error if the
+    /// selected PR is no longer queued, or an internal error when the transaction fails.
+    pub fn start_next_merge_attempt(
+        &mut self,
+        repository_id: &str,
+        request: &StartMergeAttempt,
+    ) -> Result<Option<MergeAttemptRecord>, LprmError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| persistence_error("start merge attempt transaction", error))?;
+        ensure_no_active_merge_attempt(&transaction, repository_id)?;
+        let Some(queued) = next_queued_merge(&transaction, repository_id)? else {
+            transaction
+                .commit()
+                .map_err(|error| persistence_error("finish empty queue transaction", error))?;
+            return Ok(None);
+        };
+        let status = parse_pull_request_status(&queued.status)?;
+        status.transition_to(PullRequestStatus::Merging)?;
+        insert_merge_attempt(&transaction, repository_id, request, &queued)?;
+        update_claimed_queue(&transaction, &queued.queue_id)?;
+        update_merging_pull_request(&transaction, repository_id, &queued.pull_request_id)?;
+        record_merge_attempt_audit(&transaction, repository_id, request, &queued)?;
+        transaction
+            .commit()
+            .map_err(|error| persistence_error("commit merge attempt", error))?;
+
+        self.merge_attempt_record(repository_id, &request.attempt_id)?
+            .ok_or_else(|| LprmError::internal("Merge attempt could not be read"))
+            .map(Some)
+    }
+
+    /// Lists merge attempts for a repository in start order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when SQLite cannot query or decode attempt records.
+    pub fn list_merge_attempts(
+        &self,
+        repository_id: &str,
+    ) -> Result<Vec<MergeAttemptRecord>, LprmError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT a.id, a.repository_id, a.queue_id, q.pr_id, q.revision_id, \
+                        a.target_before_sha, a.source_sha, a.candidate_commit_sha, \
+                        a.target_after_sha, a.state, a.error_code, a.started_at, a.finished_at \
+                 FROM merge_attempts a \
+                 JOIN merge_queue q ON q.id = a.queue_id \
+                 WHERE a.repository_id = ?1 \
+                 ORDER BY a.started_at, a.id",
+            )
+            .map_err(|error| persistence_error("prepare merge attempt query", error))?;
+        let rows = statement
+            .query_map([repository_id], decode_merge_attempt_record)
+            .map_err(|error| persistence_error("query merge attempts", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| persistence_error("decode merge attempts", error))
+    }
+
+    fn merge_attempt_record(
+        &self,
+        repository_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<MergeAttemptRecord>, LprmError> {
+        self.connection
+            .query_row(
+                "SELECT a.id, a.repository_id, a.queue_id, q.pr_id, q.revision_id, \
+                        a.target_before_sha, a.source_sha, a.candidate_commit_sha, \
+                        a.target_after_sha, a.state, a.error_code, a.started_at, a.finished_at \
+                 FROM merge_attempts a \
+                 JOIN merge_queue q ON q.id = a.queue_id \
+                 WHERE a.repository_id = ?1 AND a.id = ?2",
+                (repository_id, attempt_id),
+                decode_merge_attempt_record,
+            )
+            .optional()
+            .map_err(|error| persistence_error("read merge attempt", error))
+    }
+
     fn pull_request_revisions(
         &self,
         pull_request_id: &str,
@@ -1157,6 +1340,177 @@ fn decode_merge_queue_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MergeQ
     })
 }
 
+fn decode_merge_attempt_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MergeAttemptRecord> {
+    Ok(MergeAttemptRecord {
+        id: row.get(0)?,
+        repository_id: row.get(1)?,
+        queue_id: row.get(2)?,
+        pr_id: row.get(3)?,
+        revision_id: row.get(4)?,
+        target_before_sha: row.get(5)?,
+        source_sha: row.get(6)?,
+        candidate_commit_sha: row.get(7)?,
+        target_after_sha: row.get(8)?,
+        state: row.get(9)?,
+        error_code: row.get(10)?,
+        started_at: row.get(11)?,
+        finished_at: row.get(12)?,
+    })
+}
+
+fn ensure_no_active_merge_attempt(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+) -> Result<(), LprmError> {
+    let active = transaction
+        .query_row(
+            "SELECT EXISTS(\
+                SELECT 1 FROM merge_attempts \
+                WHERE repository_id = ?1 \
+                  AND state IN ('preparing', 'testing', 'integrating', 'reconciling')\
+             )",
+            [repository_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| persistence_error("check active merge attempt", error))?;
+    if active {
+        Err(LprmError::busy(
+            "Repository already has an active merge attempt",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn next_queued_merge(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+) -> Result<Option<QueuedMergeRow>, LprmError> {
+    transaction
+        .query_row(
+            "SELECT q.id, q.pr_id, q.revision_id, p.status, r.target_sha, r.source_sha \
+             FROM merge_queue q \
+             JOIN pull_requests p ON p.id = q.pr_id \
+             JOIN pr_revisions r ON r.id = q.revision_id AND r.pr_id = p.id \
+             WHERE p.repository_id = ?1 AND q.status = 'queued' \
+             ORDER BY q.priority DESC, q.enqueued_at, q.id \
+             LIMIT 1",
+            [repository_id],
+            |row| {
+                Ok(QueuedMergeRow {
+                    queue_id: row.get(0)?,
+                    pull_request_id: row.get(1)?,
+                    revision_id: row.get(2)?,
+                    status: row.get(3)?,
+                    target_sha: row.get(4)?,
+                    source_sha: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| persistence_error("select next queued pull request", error))
+}
+
+fn insert_merge_attempt(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    request: &StartMergeAttempt,
+    queued: &QueuedMergeRow,
+) -> Result<(), LprmError> {
+    transaction
+        .execute(
+            "INSERT INTO merge_attempts(\
+                id, repository_id, queue_id, target_before_sha, source_sha, state, started_at\
+             ) VALUES (\
+                ?1, ?2, ?3, ?4, ?5, 'preparing', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+             )",
+            (
+                &request.attempt_id,
+                repository_id,
+                &queued.queue_id,
+                &queued.target_sha,
+                &queued.source_sha,
+            ),
+        )
+        .map_err(|error| persistence_error("insert merge attempt", error))?;
+    Ok(())
+}
+
+fn update_claimed_queue(transaction: &Transaction<'_>, queue_id: &str) -> Result<(), LprmError> {
+    let changed = transaction
+        .execute(
+            "UPDATE merge_queue \
+             SET status = 'started', started_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?1 AND status = 'queued'",
+            [queue_id],
+        )
+        .map_err(|error| persistence_error("mark queue entry started", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LprmError::internal(
+            "Queue entry changed while starting merge attempt",
+        ))
+    }
+}
+
+fn update_merging_pull_request(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    pull_request_id: &str,
+) -> Result<(), LprmError> {
+    let changed = transaction
+        .execute(
+            "UPDATE pull_requests \
+             SET status = 'merging', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE repository_id = ?1 AND id = ?2 AND status = 'queued'",
+            (repository_id, pull_request_id),
+        )
+        .map_err(|error| persistence_error("mark pull request merging", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LprmError::internal(
+            "Pull request changed while starting merge attempt",
+        ))
+    }
+}
+
+fn record_merge_attempt_audit(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    request: &StartMergeAttempt,
+    queued: &QueuedMergeRow,
+) -> Result<(), LprmError> {
+    let payload = json!({
+        "from": "queued",
+        "to": "merging",
+        "queue_id": queued.queue_id,
+        "attempt_id": request.attempt_id,
+        "revision_id": queued.revision_id,
+        "source_sha": queued.source_sha,
+        "target_sha": queued.target_sha,
+    });
+    transaction
+        .execute(
+            "INSERT INTO audit_events(\
+                id, repository_id, pr_id, event_type, actor, payload_json, created_at\
+             ) VALUES (\
+                ?1, ?2, ?3, 'merge_attempt_started', ?4, ?5, \
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+             )",
+            (
+                &request.audit_id,
+                repository_id,
+                &queued.pull_request_id,
+                &request.actor,
+                payload.to_string(),
+            ),
+        )
+        .map_err(|error| persistence_error("record merge attempt audit", error))?;
+    Ok(())
+}
+
 fn queue_admission_row(
     transaction: &Transaction<'_>,
     repository_id: &str,
@@ -1210,6 +1564,44 @@ fn ensure_no_active_queue_entry(
     }
 }
 
+fn open_lock_file(path: &Path) -> Result<File, LprmError> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| persistence_error("open repository lock", error))?;
+    set_private_file_permissions(path)?;
+    Ok(file)
+}
+
+fn write_lock_holder(file: &mut File, operation: &str) -> Result<(), LprmError> {
+    let acquired_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| persistence_error("read lock acquisition time", error))?
+        .as_millis();
+    let holder = LockHolder {
+        pid: std::process::id(),
+        operation,
+        acquired_unix_ms,
+    };
+    file.set_len(0)
+        .map_err(|error| persistence_error("truncate lock metadata", error))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| persistence_error("seek lock metadata", error))?;
+    serde_json::to_writer(&mut *file, &holder)
+        .map_err(|error| persistence_error("write lock metadata", error))?;
+    file.write_all(b"\n")
+        .map_err(|error| persistence_error("finish lock metadata", error))?;
+    file.sync_data()
+        .map_err(|error| persistence_error("sync lock metadata", error))
+}
+
 fn default_state_root() -> Result<PathBuf, LprmError> {
     if let Some(override_path) = env::var_os("LPRM_STATE_HOME") {
         if override_path.is_empty() {
@@ -1251,5 +1643,18 @@ fn set_private_permissions(path: &Path) -> Result<(), LprmError> {
 
 #[cfg(not(unix))]
 fn set_private_permissions(_path: &Path) -> Result<(), LprmError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> Result<(), LprmError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| persistence_error("set private lock permissions", error))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> Result<(), LprmError> {
     Ok(())
 }

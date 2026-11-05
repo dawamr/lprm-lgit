@@ -1,10 +1,23 @@
-use std::path::Path;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use lprm_core::{AdmissionGates, PullRequestStatus, RevisionFingerprint};
-use lprm_store::{EnqueuePullRequest, MergeQueueRecord, NewPullRequest, Store, TransitionEvidence};
+use lprm_core::{AdmissionGates, ErrorCode, PullRequestStatus, RevisionFingerprint};
+use lprm_store::{
+    EnqueuePullRequest, MergeQueueRecord, NewPullRequest, RepositoryLock, StartMergeAttempt, Store,
+    TransitionEvidence,
+};
+use serde_json::Value;
+use tempfile::tempdir;
 
 fn approved_store() -> Store {
-    let mut store = Store::open_in_memory().expect("memory database should migrate");
+    seed_approved_store(Store::open_in_memory().expect("memory database should migrate"))
+}
+
+fn seed_approved_store(mut store: Store) -> Store {
     store
         .register_repository("repo-1", Path::new("/tmp/repo/.git"), "dev", "config")
         .expect("repository should register");
@@ -166,4 +179,128 @@ fn enqueue_rejects_each_unmet_gate_and_stale_evidence_without_mutation() {
             .status,
         PullRequestStatus::Approved
     );
+}
+
+#[test]
+fn concurrent_coordinators_produce_one_lock_holder_and_one_merge_attempt() {
+    let temporary = tempdir().expect("temporary state should create");
+    let database_path = temporary.path().join("lprm.db");
+    let lock_path = temporary.path().join("merge.lock");
+    let marker_path = temporary.path().join("lock-held");
+    let mut store = seed_approved_store(Store::open(&database_path).expect("database should open"));
+    store
+        .enqueue_pull_request("repo-1", "pr-1", &admission())
+        .expect("approved PR should enqueue");
+    drop(store);
+
+    let mut first = coordinator_process(&database_path, &lock_path, &marker_path, 1_000, 400)
+        .spawn()
+        .expect("first coordinator should spawn");
+    wait_for_file(&marker_path, Duration::from_secs(2));
+
+    let holder: Value = serde_json::from_slice(
+        &fs::read(&lock_path).expect("lock holder metadata should be readable"),
+    )
+    .expect("lock holder metadata should be JSON");
+    assert_eq!(holder["pid"], u64::from(first.id()));
+
+    let second = coordinator_process(&database_path, &lock_path, &marker_path, 50, 0)
+        .status()
+        .expect("second coordinator should run");
+    let first_status = first.wait().expect("first coordinator should finish");
+
+    assert!(first_status.success());
+    assert_eq!(second.code(), Some(ErrorCode::Busy.exit_code()));
+    let store = Store::open(&database_path).expect("database should reopen");
+    let attempts = store
+        .list_merge_attempts("repo-1")
+        .expect("attempts should query");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].state, "preparing");
+    assert_eq!(
+        store
+            .pull_request("repo-1", "pr-1")
+            .expect("PR should query")
+            .expect("PR should exist")
+            .status,
+        PullRequestStatus::Merging
+    );
+}
+
+#[test]
+#[ignore = "helper process launched by the concurrent coordinator test"]
+fn repository_lock_process_helper() {
+    let Some(database_path) = env::var_os("LPRM_TEST_COORDINATOR_DATABASE") else {
+        return;
+    };
+    let lock_path = required_path_env("LPRM_TEST_COORDINATOR_LOCK");
+    let marker_path = required_path_env("LPRM_TEST_COORDINATOR_MARKER");
+    let timeout = required_u64_env("LPRM_TEST_COORDINATOR_TIMEOUT_MS");
+    let hold = required_u64_env("LPRM_TEST_COORDINATOR_HOLD_MS");
+    let process_id = std::process::id();
+    let _lock =
+        match RepositoryLock::acquire(&lock_path, Duration::from_millis(timeout), "queue-run") {
+            Ok(lock) => lock,
+            Err(error) if error.code == ErrorCode::Busy => {
+                std::process::exit(error.exit_code());
+            }
+            Err(error) => panic!("lock acquisition failed: {error}"),
+        };
+    fs::write(&marker_path, process_id.to_string()).expect("lock marker should write");
+    let mut store = Store::open(Path::new(&database_path)).expect("database should open");
+    store
+        .start_next_merge_attempt(
+            "repo-1",
+            &StartMergeAttempt {
+                attempt_id: format!("attempt-{process_id}"),
+                audit_id: format!("audit-attempt-{process_id}"),
+                actor: format!("coordinator-{process_id}"),
+            },
+        )
+        .expect("merge attempt should start");
+    thread::sleep(Duration::from_millis(hold));
+}
+
+fn coordinator_process(
+    database_path: &Path,
+    lock_path: &Path,
+    marker_path: &Path,
+    timeout_ms: u64,
+    hold_ms: u64,
+) -> Command {
+    let mut command = Command::new(env::current_exe().expect("test executable should resolve"));
+    command
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("repository_lock_process_helper")
+        .arg("--nocapture")
+        .env("LPRM_TEST_COORDINATOR_DATABASE", database_path)
+        .env("LPRM_TEST_COORDINATOR_LOCK", lock_path)
+        .env("LPRM_TEST_COORDINATOR_MARKER", marker_path)
+        .env("LPRM_TEST_COORDINATOR_TIMEOUT_MS", timeout_ms.to_string())
+        .env("LPRM_TEST_COORDINATOR_HOLD_MS", hold_ms.to_string());
+    command
+}
+
+fn wait_for_file(path: &Path, timeout: Duration) {
+    let started = Instant::now();
+    while !path.exists() {
+        assert!(
+            started.elapsed() < timeout,
+            "timed out waiting for {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn required_path_env(name: &str) -> PathBuf {
+    env::var_os(name).map_or_else(|| panic!("{name} should be set"), PathBuf::from)
+}
+
+fn required_u64_env(name: &str) -> u64 {
+    env::var(name)
+        .unwrap_or_else(|_| panic!("{name} should be set"))
+        .parse()
+        .unwrap_or_else(|_| panic!("{name} should be an integer"))
 }

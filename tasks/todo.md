@@ -183,10 +183,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T17: Serialize a durable merge queue
 
 **Acceptance criteria:**
-- [ ] Queue admission enforces gates and one repository-scoped cross-process lock prevents duplicate active merges.
+- [x] Queue admission enforces gates and one repository-scoped cross-process lock prevents duplicate active merges.
 
 **Verification:**
-- [ ] Two concurrent coordinator processes produce exactly one lock holder and one merge attempt.
+- [x] Two concurrent coordinator processes produce exactly one lock holder and one merge attempt.
 
 **Dependencies:** T09, T16
 
