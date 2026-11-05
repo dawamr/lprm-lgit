@@ -321,12 +321,170 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             WorktreeCommand::Status(status) => show_worktree_status(&status.id),
             WorktreeCommand::Cleanup(cleanup) => cleanup_worktree(cleanup, cli.yes),
         },
+        Command::Pr(arguments) => match &arguments.command {
+            PrCommand::Create(create) => create_pull_request(create),
+            PrCommand::List(list) => list_pull_requests(list),
+            PrCommand::Show(show) => show_pull_request(&show.id),
+            PrCommand::Diff(diff) => diff_pull_request(diff),
+            PrCommand::Close(close) => close_pull_request(close),
+            _ => Err(LprmError::internal("PR operation is not implemented yet")),
+        },
         Command::Recover(_) => recover_worktree_orphans(),
         _ => Err(LprmError::internal(format!(
             "{} is not implemented yet",
             cli.command_name()
         ))),
     }
+}
+
+fn create_pull_request(arguments: &PrCreateArgs) -> Result<Value, LprmError> {
+    if arguments.title.trim().is_empty() {
+        return Err(LprmError::invalid_argument(
+            "Pull request title must not be empty",
+        ));
+    }
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let git = lprm_git::Git::default();
+    let repository = git.discover(&current_directory)?;
+    let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
+    let (mut store, layout) = open_current_store()?;
+    let target_branch = store
+        .repository_target(layout.repository_id())?
+        .ok_or_else(|| LprmError::git_precondition("Repository initialization is missing"))?;
+    let source_sha =
+        git.resolve_local_branch(&repository.worktree_root, &arguments.source_branch)?;
+    let source_worktree = store
+        .list_worktrees(layout.repository_id())?
+        .into_iter()
+        .find(|record| record.branch == arguments.source_branch)
+        .ok_or_else(|| {
+            LprmError::git_precondition(
+                "Pull request source must be an active LPRM-managed worktree",
+            )
+        })?;
+    let observation = git.observe_worktree(&source_worktree.absolute_path)?;
+    if !observation.present
+        || observation.actual_branch.as_deref() != Some(arguments.source_branch.as_str())
+    {
+        return Err(LprmError::git_precondition(
+            "Pull request source worktree ownership does not match Git state",
+        ));
+    }
+    if observation.dirty != Some(false) {
+        return Err(LprmError::validation_failed(
+            "Commit or discard source worktree changes before creating a pull request",
+        ));
+    }
+    if observation.head_sha.as_deref() != Some(source_sha.as_str()) {
+        return Err(LprmError::git_precondition(
+            "Pull request source branch and worktree HEAD do not match",
+        ));
+    }
+    let target_sha = git.resolve_local_branch(&repository.worktree_root, &target_branch)?;
+    let diff = git.collect_diff(&repository.worktree_root, &target_sha, &source_sha)?;
+    if diff.commits.is_empty() || diff.files.is_empty() {
+        return Err(LprmError::validation_failed(
+            "Pull request source has no committed content changes relative to the target",
+        ));
+    }
+    let body = arguments.body_file.as_deref().map_or_else(
+        || Ok(String::new()),
+        |path| {
+            std::fs::read_to_string(path).map_err(|error| {
+                LprmError::invalid_argument(format!(
+                    "Unable to read pull request body file {path:?}: {error}"
+                ))
+            })
+        },
+    )?;
+    let fingerprint = config.fingerprint()?;
+    let request = lprm_store::NewPullRequest {
+        id: format!("pr_{}", uuid::Uuid::now_v7().simple()),
+        repository_id: layout.repository_id().to_owned(),
+        worktree_id: Some(source_worktree.id),
+        title: arguments.title.clone(),
+        body,
+        source_branch: arguments.source_branch.clone(),
+        target_branch,
+        revision_id: format!("revision_{}", uuid::Uuid::now_v7().simple()),
+        source_sha,
+        target_sha,
+        policy_hash: fingerprint.clone(),
+        check_config_hash: fingerprint,
+    };
+    let record = store.create_pull_request(&request)?;
+    serde_json::to_value(record)
+        .map_err(|_| LprmError::internal("Pull request serialization failed"))
+}
+
+fn list_pull_requests(arguments: &PrListArgs) -> Result<Value, LprmError> {
+    let (store, layout) = open_current_store()?;
+    let status = arguments
+        .status
+        .as_deref()
+        .map(parse_pull_request_status)
+        .transpose()?;
+    let records = store.list_pull_requests(layout.repository_id(), status)?;
+    serde_json::to_value(records)
+        .map_err(|_| LprmError::internal("Pull request list serialization failed"))
+}
+
+fn show_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
+    let (store, layout) = open_current_store()?;
+    let record = store
+        .pull_request(layout.repository_id(), pull_request_id)?
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown pull request ID {pull_request_id:?}"))
+        })?;
+    serde_json::to_value(record)
+        .map_err(|_| LprmError::internal("Pull request serialization failed"))
+}
+
+fn diff_pull_request(arguments: &PrDiffArgs) -> Result<Value, LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let git = lprm_git::Git::default();
+    let repository = git.discover(&current_directory)?;
+    let (store, layout) = open_current_store()?;
+    let record = store
+        .pull_request(layout.repository_id(), &arguments.id)?
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown pull request ID {:?}", arguments.id))
+        })?;
+    let revision = record
+        .revisions
+        .last()
+        .ok_or_else(|| LprmError::internal("Pull request has no revision history"))?;
+    let diff = git.collect_diff(
+        &repository.worktree_root,
+        &revision.target_sha,
+        &revision.source_sha,
+    )?;
+    let mut value = serde_json::to_value(diff)
+        .map_err(|_| LprmError::internal("Pull request diff serialization failed"))?;
+    if arguments.stat
+        && let Some(object) = value.as_object_mut()
+    {
+        object.remove("patch");
+    }
+    Ok(value)
+}
+
+fn close_pull_request(arguments: &ReasonArgs) -> Result<Value, LprmError> {
+    let (mut store, layout) = open_current_store()?;
+    let record = store.close_pull_request(layout.repository_id(), &arguments.id)?;
+    serde_json::to_value(record)
+        .map_err(|_| LprmError::internal("Pull request serialization failed"))
+}
+
+fn parse_pull_request_status(value: &str) -> Result<lprm_core::PullRequestStatus, LprmError> {
+    lprm_core::PullRequestStatus::ALL
+        .into_iter()
+        .find(|status| status.as_str() == value)
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown pull request status {value:?}"))
+        })
 }
 
 fn recover_worktree_orphans() -> Result<Value, LprmError> {

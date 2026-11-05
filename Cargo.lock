@@ -380,6 +380,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -419,6 +420,7 @@ dependencies = [
  "hex",
  "lprm-core",
  "rusqlite",
+ "serde",
  "sha2",
  "tempfile",
 ]

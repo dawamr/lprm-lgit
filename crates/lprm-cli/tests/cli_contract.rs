@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
@@ -445,6 +445,179 @@ fn recover_reports_database_only_and_git_only_worktrees_without_mutation() {
     );
     assert!(orphans.iter().any(|orphan| orphan["kind"] == "git_only"));
     assert!(git_only_path.exists());
+}
+
+#[test]
+fn pull_request_create_rejects_empty_dirty_and_missing_sources() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let (repository, state, source_path, source_branch) = setup_pr_fixture(fixture.path());
+
+    let empty = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "pr",
+            "create",
+            "--from",
+            &source_branch,
+            "--title",
+            "Empty",
+        ],
+    );
+    assert_eq!(empty.status.code(), Some(5));
+
+    std::fs::write(source_path.join("feature.txt"), "uncommitted\n")
+        .expect("dirty fixture should be written");
+    let dirty = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "pr",
+            "create",
+            "--from",
+            &source_branch,
+            "--title",
+            "Dirty",
+        ],
+    );
+    assert_eq!(dirty.status.code(), Some(5));
+
+    let missing = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "pr",
+            "create",
+            "--from",
+            "missing/branch",
+            "--title",
+            "Missing",
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(3));
+}
+
+#[test]
+fn pull_request_lifecycle_persists_and_uses_the_exact_revision() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let (repository, state, source_path, source_branch) = setup_pr_fixture(fixture.path());
+    std::fs::write(source_path.join("feature.txt"), "committed\n")
+        .expect("feature fixture should be written");
+    run_git(&source_path, &["add", "--", "feature.txt"]);
+    run_git(&source_path, &["commit", "--quiet", "-m", "feature"]);
+    let source_sha = git_stdout(&source_path, &["rev-parse", "HEAD"]);
+    let target_sha = git_stdout(&repository, &["rev-parse", "dev"]);
+    let body_path = fixture.path().join("body.md");
+    std::fs::write(&body_path, "Lifecycle body\n").expect("body should be written");
+
+    let created = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "pr",
+            "create",
+            "--from",
+            &source_branch,
+            "--title",
+            "Add feature",
+            "--body-file",
+            body_path.to_str().expect("body path should be UTF-8"),
+        ],
+    );
+    let created_document: Value =
+        serde_json::from_slice(&created.stdout).expect("stdout should be JSON");
+    assert!(
+        created.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let pr_id = created_document["data"]["pr_id"]
+        .as_str()
+        .expect("PR ID should be a string");
+    assert_eq!(created_document["data"]["status"], "draft");
+    assert_eq!(created_document["data"]["body"], "Lifecycle body\n");
+    assert_eq!(
+        created_document["data"]["revisions"][0]["source_sha"],
+        source_sha
+    );
+    assert_eq!(
+        created_document["data"]["revisions"][0]["target_sha"],
+        target_sha
+    );
+
+    let listed = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "pr", "list", "--status", "draft"],
+    );
+    let listed_document: Value =
+        serde_json::from_slice(&listed.stdout).expect("stdout should be JSON");
+    assert_eq!(listed_document["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(listed_document["data"][0]["pr_id"], pr_id);
+
+    let shown = lprm_in_with_state(&repository, &state, &["--json", "pr", "show", pr_id]);
+    let shown_document: Value =
+        serde_json::from_slice(&shown.stdout).expect("stdout should be JSON");
+    assert_eq!(shown_document["data"]["pr_id"], pr_id);
+
+    let diff = lprm_in_with_state(&repository, &state, &["--json", "pr", "diff", pr_id]);
+    let diff_document: Value = serde_json::from_slice(&diff.stdout).expect("stdout should be JSON");
+    assert_eq!(diff_document["data"]["source_sha"], source_sha);
+    assert_eq!(diff_document["data"]["target_sha"], target_sha);
+    assert_eq!(diff_document["data"]["files"][0]["path"], "feature.txt");
+    assert!(diff_document["data"]["patch"].as_str().is_some());
+
+    let stat = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "pr", "diff", pr_id, "--stat"],
+    );
+    let stat_document: Value = serde_json::from_slice(&stat.stdout).expect("stdout should be JSON");
+    assert_eq!(stat_document["data"]["files"][0]["path"], "feature.txt");
+    assert_eq!(stat_document["data"]["patch"], Value::Null);
+
+    let closed = lprm_in_with_state(&repository, &state, &["--json", "pr", "close", pr_id]);
+    let closed_document: Value =
+        serde_json::from_slice(&closed.stdout).expect("stdout should be JSON");
+    assert_eq!(closed_document["data"]["status"], "closed");
+    assert_eq!(
+        closed_document["data"]["revisions"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+}
+
+fn setup_pr_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf, String) {
+    let repository = root.join("repository");
+    let state = root.join("state");
+    std::fs::create_dir(&repository).expect("repository directory should be created");
+    initialize_repository(&repository);
+    assert!(
+        lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"])
+            .status
+            .success()
+    );
+    let created = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "worktree", "create", "--task", "PR lifecycle"],
+    );
+    let document: Value = serde_json::from_slice(&created.stdout).expect("stdout should be JSON");
+    let source_path = PathBuf::from(
+        document["data"]["path"]
+            .as_str()
+            .expect("worktree path should be a string"),
+    );
+    let source_branch = document["data"]["branch"]
+        .as_str()
+        .expect("branch should be a string")
+        .to_owned();
+    (repository, state, source_path, source_branch)
 }
 
 fn assert_dirty_and_missing_observations(

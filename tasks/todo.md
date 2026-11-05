@@ -111,10 +111,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T10: Implement local PR lifecycle queries
 
 **Acceptance criteria:**
-- [ ] Create/list/show/diff/close persist immutable IDs and revision history while rejecting dirty, missing, and empty sources.
+- [x] Create/list/show/diff/close persist immutable IDs and revision history while rejecting dirty, missing, and empty sources.
 
 **Verification:**
-- [ ] Temporary Git plus SQLite lifecycle tests pass.
+- [x] Temporary Git plus SQLite lifecycle tests pass.
 
 **Dependencies:** T09, T13
 
