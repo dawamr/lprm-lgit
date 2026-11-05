@@ -22,7 +22,7 @@ pub enum OutputFormat {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "lprm",
+    name = "lgit",
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LPRM_BUILD_INFO"), ")"),
     about = "Local Pull Request Manager"
 )]
@@ -1300,7 +1300,7 @@ mod tests {
     #[test]
     fn parses_the_documented_nested_command_shape() {
         let cli = Cli::try_parse_from([
-            "lprm",
+            "lgit",
             "pr",
             "create",
             "--from",
@@ -1317,7 +1317,7 @@ mod tests {
 
     #[test]
     fn output_json_alias_enables_machine_mode() {
-        let cli = Cli::try_parse_from(["lprm", "--output", "json", "doctor"])
+        let cli = Cli::try_parse_from(["lgit", "--output", "json", "doctor"])
             .expect("output alias should parse");
 
         assert_eq!(cli.output, Some(OutputFormat::Json));
@@ -1326,7 +1326,7 @@ mod tests {
 
     #[test]
     fn detects_machine_mode_before_clap_reports_invalid_arguments() {
-        let args = [OsString::from("lprm"), OsString::from("--output=json")];
+        let args = [OsString::from("lgit"), OsString::from("--output=json")];
 
         assert!(machine_output_requested(&args));
     }

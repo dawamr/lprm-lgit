@@ -3,9 +3,9 @@
 ## First-time setup
 
 ```sh
-lprm doctor
-lprm init --target dev
-lprm config show
+lgit doctor
+lgit init --target dev
+lgit config show
 ```
 
 `doctor` must report Git 2.38 or newer and a working `merge-tree --write-tree`. `init` is
@@ -14,20 +14,20 @@ Keep the main checkout of `dev` clean: the coordinator refuses to merge into a d
 
 ## Daily operation
 
-1. Agent: `lprm --actor <agent> worktree create --task "..."`, commit, then `pr create`.
+1. Agent: `lgit --actor <agent> worktree create --task "..."`, commit, then `pr create`.
 2. Validator: `pr ready`, then `pr check`.
 3. Optional: `pr review`, and `pr approve --reason "..."` by a second identity for risky changes.
 4. Coordinator: `pr enqueue`, then `queue run --once` (or `--all` from a scheduler).
-5. After merge, `worktree cleanup <id>` (dry run), then `lprm --yes worktree cleanup <id>`.
+5. After merge, `worktree cleanup <id>` (dry run), then `lgit --yes worktree cleanup <id>`.
 
 ## Reading state
 
 ```sh
-lprm --json pr list --status failed
-lprm --json pr show <pr-id>
-lprm --json audit <pr-id>
-lprm --json queue list
-lprm --json worktree list
+lgit --json pr list --status failed
+lgit --json pr show <pr-id>
+lgit --json audit <pr-id>
+lgit --json queue list
+lgit --json worktree list
 ```
 
 Check logs live under `<state>/.../logs/`; the `suite` object returned by `pr check` lists each log path.
@@ -43,7 +43,7 @@ Check logs live under `<state>/.../logs/`; the `suite` object returned by `pr ch
 | PR is `failed` after `queue run` | The combined tree failed the required checks; the target is untouched | Fix on the branch, `pr sync`, `pr check`, `pr enqueue` |
 | PR is `failed` after `pr check` | A required check failed | Read the stdout and stderr logs, fix, `pr sync` |
 | PR is `conflict` | Merge preflight found a conflict | Rebase or merge `dev` into the branch, commit, `pr sync` |
-| `queue run` exits 7 with "active merge attempt" | An attempt is `reconciling` | Run `lprm recover --dry-run`, then `lprm recover` |
+| `queue run` exits 7 with "active merge attempt" | An attempt is `reconciling` | Run `lgit recover --dry-run`, then `lgit recover` |
 | Exit 8 `INTERNAL` mentioning the database | Corrupt or unreadable state | See the next section |
 
 ## Recovering from a crash
@@ -51,8 +51,8 @@ Check logs live under `<state>/.../logs/`; the `suite` object returned by `pr ch
 Kill the process anywhere and nothing is lost. Run:
 
 ```sh
-lprm recover --dry-run
-lprm recover
+lgit recover --dry-run
+lgit recover
 ```
 
 Recovery compares each active attempt with Git ancestry and never resets, cleans, or rewrites refs:
@@ -71,7 +71,7 @@ risk. If the database is unusable, every command fails with exit 8 and touches n
 
 1. Stop all coordinators.
 2. Restore the state directory from your latest backup if you have one.
-3. Without a backup, move the state directory aside and run `lprm init`. Open PRs and worktree
+3. Without a backup, move the state directory aside and run `lgit init`. Open PRs and worktree
    registrations are not reconstructed (there is no command to adopt an existing worktree yet), so
    rebuild the work: create new worktrees and cherry-pick the commits from the old branches.
 4. Keep the old directory; it is the only record of the previous audit trail.

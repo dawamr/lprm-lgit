@@ -130,7 +130,7 @@ fn assert_audit_actors(repository: &Path, state: &Path, pr_id: &str) {
 }
 
 fn lprm(repository: &Path, state: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_lprm"))
+    Command::new(env!("CARGO_BIN_EXE_lgit"))
         .current_dir(repository)
         .env("LPRM_STATE_HOME", state)
         .args(arguments)

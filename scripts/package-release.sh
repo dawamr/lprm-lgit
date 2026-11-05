@@ -10,7 +10,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 TARGET=${1:-$(rustc -vV | sed -n 's/^host: //p')}
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-NAME="lprm-$VERSION-$TARGET"
+NAME="lgit-$VERSION-$TARGET"
 
 if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
     SOURCE_DATE_EPOCH=$(git log -1 --format=%ct 2>/dev/null || echo 0)
@@ -25,7 +25,7 @@ cargo build --release --locked --target "$TARGET" -p lprm-cli
 STAGE="dist/stage/$NAME"
 rm -rf "dist/stage" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256"
 mkdir -p "$STAGE/docs/examples" "$STAGE/scripts"
-cp "target/$TARGET/release/lprm" "$STAGE/lprm"
+cp "target/$TARGET/release/lgit" "$STAGE/lgit"
 cp README.md CHANGELOG.md "$STAGE/"
 cp docs/*.md "$STAGE/docs/"
 cp -R skills "$STAGE/skills"

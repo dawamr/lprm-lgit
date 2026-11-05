@@ -1,6 +1,6 @@
 ---
 name: lprm-contributor
-description: Use when you are a coding agent working in a repository managed by LPRM (has .lprm.toml or the user mentions lprm, local PRs, or worktrees under lprm). Covers creating an isolated worktree, committing, opening and updating a local pull request, and reacting to stale or failed validation. Do not use for merging; that is the coordinator's job.
+description: Use when you are a coding agent working in a repository managed by LPRM (has .lprm.toml or the user mentions lgit, local PRs, or worktrees under lgit). Covers creating an isolated worktree, committing, opening and updating a local pull request, and reacting to stale or failed validation. Do not use for merging; that is the coordinator's job.
 ---
 
 # LPRM contributor
@@ -16,7 +16,7 @@ code, and read `error.code` from stdout for details. `--actor` is a label for ow
 1. Create an isolated worktree from the exact target SHA:
 
    ```sh
-   lprm --json --actor codex worktree create --task "short description"
+   lgit --json --actor codex worktree create --task "short description"
    ```
 
    Read `data.path` and `data.branch`. Work and commit only inside that path. Do not edit the
@@ -28,7 +28,7 @@ code, and read `error.code` from stdout for details. `--actor` is a label for ow
 3. Open the PR:
 
    ```sh
-   lprm --json --actor codex pr create --from <branch> --title "Title" --body-file body.md
+   lgit --json --actor codex pr create --from <branch> --title "Title" --body-file body.md
    ```
 
    Keep the returned `data.pr_id`.
@@ -36,22 +36,22 @@ code, and read `error.code` from stdout for details. `--actor` is a label for ow
 4. If you commit more work, or the target moved, record a new revision:
 
    ```sh
-   lprm --json --actor codex pr sync <pr-id>
+   lgit --json --actor codex pr sync <pr-id>
    ```
 
 5. Hand off to the coordinator. Check where the PR stands with `pr show <pr-id>`, and read the
    journal with `audit <pr-id>`:
 
    ```sh
-   lprm --json pr show <pr-id>
-   lprm --json audit <pr-id>
+   lgit --json pr show <pr-id>
+   lgit --json audit <pr-id>
    ```
 
 6. After the PR is `merged`, preview and then remove your worktree:
 
    ```sh
-   lprm --json --actor codex worktree cleanup <id>
-   lprm --json --actor codex --yes worktree cleanup <id>
+   lgit --json --actor codex worktree cleanup <id>
+   lgit --json --actor codex --yes worktree cleanup <id>
    ```
 
    Cleanup refuses dirty, unowned, or unmerged worktrees. Never force it.

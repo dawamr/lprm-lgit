@@ -24,8 +24,8 @@ only through a serialized coordinator. Nothing needs a network, a remote, a daem
 
 ```sh
 cargo build --release --locked
-install -m 0755 target/release/lprm /usr/local/bin/lprm
-lprm doctor
+install -m 0755 target/release/lgit /usr/local/bin/lgit
+lgit doctor
 ```
 
 Release archives and checksums are described in [docs/install.md](docs/install.md).
@@ -33,14 +33,14 @@ Release archives and checksums are described in [docs/install.md](docs/install.m
 ## Five-minute tour
 
 ```sh
-lprm init --target dev
-lprm --actor codex worktree create --task "add greeting"
+lgit init --target dev
+lgit --actor codex worktree create --task "add greeting"
 # ...commit inside the printed worktree path, then:
-lprm --actor codex pr create --from <branch> --title "Add greeting"
-lprm --actor validator pr ready <pr-id>
-lprm --actor validator pr check <pr-id>
-lprm --actor coordinator pr enqueue <pr-id>
-lprm --actor merger queue run --once
+lgit --actor codex pr create --from <branch> --title "Add greeting"
+lgit --actor validator pr ready <pr-id>
+lgit --actor validator pr check <pr-id>
+lgit --actor coordinator pr enqueue <pr-id>
+lgit --actor merger queue run --once
 ```
 
 Add `--json` to any command for the stable machine envelope. See [docs/cli-contract.md](docs/cli-contract.md)

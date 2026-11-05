@@ -11,7 +11,7 @@ is executed by the test suite against a temporary repository.
 ## Codex: from task to PR
 
 ```sh
-lprm --json --actor codex worktree create --task "add feature"
+lgit --json --actor codex worktree create --task "add feature"
 ```
 
 The response gives `data.path` and `data.branch`. Work and commit only inside that path:
@@ -19,30 +19,30 @@ The response gives `data.path` and `data.branch`. Work and commit only inside th
 ```sh
 git -C "$WORKTREE" add -A
 git -C "$WORKTREE" commit -m "Add feature"
-lprm --json --actor codex pr create --from "$BRANCH" --title "Add feature" --body-file body.md
+lgit --json --actor codex pr create --from "$BRANCH" --title "Add feature" --body-file body.md
 ```
 
 `pr create` refuses dirty worktrees, missing branches, and branches with no new commits. It never
 stages or commits for you. If the PR later needs changes, commit more work and then:
 
 ```sh
-lprm --json --actor codex pr sync <pr-id>
+lgit --json --actor codex pr sync <pr-id>
 ```
 
 ## Hermes: validate, gate, merge
 
 ```sh
-lprm --json --actor hermes pr ready <pr-id>
-lprm --json --actor hermes pr check <pr-id>
-lprm --json --actor hermes pr review <pr-id>
-lprm --json --actor hermes pr enqueue <pr-id>
-lprm --json --actor hermes queue run --once
+lgit --json --actor hermes pr ready <pr-id>
+lgit --json --actor hermes pr check <pr-id>
+lgit --json --actor hermes pr review <pr-id>
+lgit --json --actor hermes pr enqueue <pr-id>
+lgit --json --actor hermes queue run --once
 ```
 
 Protected paths raise the risk to `high`. Then `pr enqueue` exits 5 until a different identity approves:
 
 ```sh
-lprm --json --actor operator pr approve <pr-id> --reason "reviewed the migration"
+lgit --json --actor operator pr approve <pr-id> --reason "reviewed the migration"
 ```
 
 To queue low-risk PRs automatically, set `policy.auto_enqueue_risks = ["low"]`; `pr check` then
@@ -59,15 +59,15 @@ reports `auto_enqueue` in its response and no separate `enqueue` call is needed.
 | Exit 5 on `pr check` | Read the log paths in the response, fix, commit, `pr sync` |
 | Exit 5 on `pr enqueue` | Follow `error.message`: review, approval, or a failed gate |
 | `queue run` lists `invalidated` | Repeat `pr sync`, `pr check`, `pr enqueue` for those PRs |
-| Anything about `reconciling` | Stop and run `lprm recover --dry-run`; ask a human if it reports `NEEDS_OPERATOR_REVIEW` |
+| Anything about `reconciling` | Stop and run `lgit recover --dry-run`; ask a human if it reports `NEEDS_OPERATOR_REVIEW` |
 
 ## After a crash
 
 Any process can be killed at any point. Restart with:
 
 ```sh
-lprm --json --actor hermes recover --dry-run
-lprm --json --actor hermes recover
+lgit --json --actor hermes recover --dry-run
+lgit --json --actor hermes recover
 ```
 
 Recovery completes a merge that Git already performed, or requeues one that never started. It

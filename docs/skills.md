@@ -28,5 +28,5 @@ it replaces them. Release archives include `skills/` and the installer.
 Pair `lprm-contributor` with the agent that writes code and `lprm-coordinator` with the agent that
 validates and merges, and give them different `--actor` names (see [agent-workflows.md](agent-workflows.md)).
 
-A test parses every `lprm` command in the skills with the real CLI and exercises the installer, so
+A test parses every `lgit` command in the skills with the real CLI and exercises the installer, so
 the skills cannot drift from the implementation.

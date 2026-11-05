@@ -155,7 +155,7 @@ fn repeated_concurrent_queue_runs_never_duplicate_a_merge() {
 
         let children = (0..4)
             .map(|_| {
-                Command::new(env!("CARGO_BIN_EXE_lprm"))
+                Command::new(env!("CARGO_BIN_EXE_lgit"))
                     .current_dir(&fixture.repository)
                     .env("LPRM_STATE_HOME", &fixture.state)
                     .args(["--json", "queue", "run", "--all"])

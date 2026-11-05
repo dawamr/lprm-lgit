@@ -61,7 +61,7 @@ impl Fixture {
     }
 
     pub fn lprm(&self, arguments: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_lprm"))
+        Command::new(env!("CARGO_BIN_EXE_lgit"))
             .current_dir(&self.repository)
             .env("LPRM_STATE_HOME", &self.state)
             .args(arguments)
@@ -179,7 +179,7 @@ pub fn shell_commands_in(text: &str) -> Vec<Vec<String>> {
             continue;
         }
         let line = line.trim();
-        if in_shell && line.starts_with("lprm ") {
+        if in_shell && line.starts_with("lgit ") {
             let line = line.split(" #").next().unwrap();
             let mut words = split_words(line);
             for word in &mut words {

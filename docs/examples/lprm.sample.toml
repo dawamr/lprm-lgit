@@ -36,7 +36,7 @@ max_payload_bytes = 1048576
 
 [policy]
 protected_paths = ["migrations/**", ".github/**", "infra/**", "auth/**"]
-# Queue low-risk PRs automatically after `lprm pr check` passes. Default: none (opt in).
+# Queue low-risk PRs automatically after `lgit pr check` passes. Default: none (opt in).
 auto_enqueue_risks = []
 
 # Optional one-way notifications. Off unless a command is set; never able to change decisions.

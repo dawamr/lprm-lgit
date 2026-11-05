@@ -38,31 +38,31 @@ not change incompatibly; new fields are only ever added.
 ## Commands
 
 ```sh
-lprm init --target dev
-lprm doctor
-lprm config show
-lprm worktree create --task "short task description"
-lprm worktree list
-lprm worktree status <id>
-lprm worktree cleanup <id>
-lprm --yes worktree cleanup <id>
-lprm pr create --from <branch> --title "Title" --body-file body.md
-lprm pr list --status ready
-lprm pr show <pr-id>
-lprm pr diff <pr-id> --stat
-lprm pr ready <pr-id>
-lprm pr sync <pr-id>
-lprm pr check <pr-id>
-lprm pr review <pr-id>
-lprm pr approve <pr-id> --reason "reviewed the auth change"
-lprm pr enqueue <pr-id>
-lprm pr close <pr-id> --reason "superseded"
-lprm queue list
-lprm queue run --once
-lprm queue run --all
-lprm audit <pr-id>
-lprm recover --dry-run
-lprm recover
+lgit init --target dev
+lgit doctor
+lgit config show
+lgit worktree create --task "short task description"
+lgit worktree list
+lgit worktree status <id>
+lgit worktree cleanup <id>
+lgit --yes worktree cleanup <id>
+lgit pr create --from <branch> --title "Title" --body-file body.md
+lgit pr list --status ready
+lgit pr show <pr-id>
+lgit pr diff <pr-id> --stat
+lgit pr ready <pr-id>
+lgit pr sync <pr-id>
+lgit pr check <pr-id>
+lgit pr review <pr-id>
+lgit pr approve <pr-id> --reason "reviewed the auth change"
+lgit pr enqueue <pr-id>
+lgit pr close <pr-id> --reason "superseded"
+lgit queue list
+lgit queue run --once
+lgit queue run --all
+lgit audit <pr-id>
+lgit recover --dry-run
+lgit recover
 ```
 
 | Command | Effect | `data` highlights |
@@ -108,7 +108,7 @@ For each attempt the coordinator builds a disposable detached worktree from the 
 merges the exact source SHA with `--no-ff`, and runs the required checks there. A rejected
 candidate marks the PR `failed` and leaves the target untouched. A passing candidate is merged on
 the real target with a guarded compare-and-swap, and the resulting tree and parents must match the
-tested candidate. Any other failure leaves the attempt `reconciling` for `lprm recover`.
+tested candidate. Any other failure leaves the attempt `reconciling` for `lgit recover`.
 
 ## Review adapter protocol
 

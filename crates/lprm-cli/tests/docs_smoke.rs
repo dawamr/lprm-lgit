@@ -110,7 +110,7 @@ fn sample_config_loads_and_matches_the_defaults() {
 
 #[test]
 fn example_agent_workflow_runs_against_a_temporary_repository() {
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_lprm"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_lgit"));
     let path = format!(
         "{}:{}",
         binary.parent().unwrap().display(),

@@ -141,7 +141,7 @@ fn ac08_concurrent_queue_runs_create_one_merge() {
 
     let children = (0..2)
         .map(|_| {
-            Command::new(env!("CARGO_BIN_EXE_lprm"))
+            Command::new(env!("CARGO_BIN_EXE_lgit"))
                 .current_dir(&fixture.repository)
                 .env("LPRM_STATE_HOME", &fixture.state)
                 .args(["--json", "queue", "run", "--once"])

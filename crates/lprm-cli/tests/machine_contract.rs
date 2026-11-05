@@ -129,13 +129,13 @@ fn busy_and_internal_failures_keep_their_public_exit_codes() {
 
 #[test]
 fn argument_and_repository_errors_keep_exit_two_and_three() {
-    let invalid = Command::new(env!("CARGO_BIN_EXE_lprm"))
+    let invalid = Command::new(env!("CARGO_BIN_EXE_lgit"))
         .args(["--json", "pr", "show"])
         .output()
         .unwrap();
     assert_error(&invalid, 2, "INVALID_ARGUMENT", false);
     let outside = tempdir().unwrap();
-    let git_precondition = Command::new(env!("CARGO_BIN_EXE_lprm"))
+    let git_precondition = Command::new(env!("CARGO_BIN_EXE_lgit"))
         .current_dir(outside.path())
         .args(["--json", "doctor"])
         .output()
@@ -202,7 +202,7 @@ fn write_check_config(repository: &Path) {
 }
 
 fn lprm(repository: &Path, state: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_lprm"))
+    Command::new(env!("CARGO_BIN_EXE_lgit"))
         .current_dir(repository)
         .env("LPRM_STATE_HOME", state)
         .args(arguments)

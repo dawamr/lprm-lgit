@@ -11,11 +11,11 @@ Always pass `--json` and a stable `--actor` such as `hermes`. Branch on exit cod
 ## Pipeline for one PR
 
 ```sh
-lprm --json --actor hermes pr ready <pr-id>
-lprm --json --actor hermes pr check <pr-id>
-lprm --json --actor hermes pr review <pr-id>
-lprm --json --actor hermes pr enqueue <pr-id>
-lprm --json --actor hermes queue run --once
+lgit --json --actor hermes pr ready <pr-id>
+lgit --json --actor hermes pr check <pr-id>
+lgit --json --actor hermes pr review <pr-id>
+lgit --json --actor hermes pr enqueue <pr-id>
+lgit --json --actor hermes queue run --once
 ```
 
 - `pr check` runs the conflict preflight and the required checks. The response lists log paths
@@ -31,7 +31,7 @@ Protected paths (for example `auth/**`, `migrations/**`) make a PR `high` risk. 
 exits 5 until a different identity from the PR creator approves with a reason:
 
 ```sh
-lprm --json --actor operator pr approve <pr-id> --reason "reviewed the migration"
+lgit --json --actor operator pr approve <pr-id> --reason "reviewed the migration"
 ```
 
 Never approve on behalf of the creator, and never invent a reason. If you are not authorised to

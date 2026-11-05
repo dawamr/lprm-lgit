@@ -5,14 +5,14 @@ use serde_json::Value;
 use tempfile::tempdir;
 
 fn lprm(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_lprm"))
+    Command::new(env!("CARGO_BIN_EXE_lgit"))
         .args(args)
         .output()
         .expect("lprm should start")
 }
 
 fn lprm_in(directory: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_lprm"))
+    Command::new(env!("CARGO_BIN_EXE_lgit"))
         .current_dir(directory)
         .args(args)
         .output()
@@ -20,7 +20,7 @@ fn lprm_in(directory: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 fn lprm_in_with_state(directory: &Path, state: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_lprm"))
+    Command::new(env!("CARGO_BIN_EXE_lgit"))
         .current_dir(directory)
         .env("LPRM_STATE_HOME", state)
         .args(args)
@@ -34,7 +34,7 @@ fn lprm_in_with_identity_env(
     identity: &str,
     args: &[&str],
 ) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_lprm"))
+    Command::new(env!("CARGO_BIN_EXE_lgit"))
         .current_dir(directory)
         .env("LPRM_STATE_HOME", state)
         .env("LPRM_ACTOR", identity)

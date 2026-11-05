@@ -2,14 +2,14 @@
 
 LPRM attributes local mutations to a validated, self-declared caller identity. Supply it with the global `--actor <identity>` option or the `LPRM_ACTOR` environment variable. An explicit option takes precedence over the environment. If neither is present, LPRM uses `local-operator`.
 
-`lprm worktree create --agent <identity>` remains a compatibility alias. When `--actor` and `--agent` are both present, they must match. New worktrees always persist the resolved caller as `owner_agent`.
+`lgit worktree create --agent <identity>` remains a compatibility alias. When `--actor` and `--agent` are both present, they must match. New worktrees always persist the resolved caller as `owner_agent`.
 
 ```console
-LPRM_ACTOR=codex lprm --json worktree create --task "Add cache"
-lprm --json --actor codex pr create --from task/add-cache-... --title "Add cache"
-lprm --json --actor validator pr check <pr-id>
-lprm --json --actor coordinator pr enqueue <pr-id>
-lprm --json --actor coordinator queue run --once
+LPRM_ACTOR=codex lgit --json worktree create --task "Add cache"
+lgit --json --actor codex pr create --from task/add-cache-... --title "Add cache"
+lgit --json --actor validator pr check <pr-id>
+lgit --json --actor coordinator pr enqueue <pr-id>
+lgit --json --actor coordinator queue run --once
 ```
 
 PR creation and worktree cleanup reject callers whose identity differs from the persisted worktree owner. Other PR state changes, queue processing, and recovery record the actual caller in audit events. Approval persistence already requires an actor, and the core role-separation policy rejects the same identity acting as both contributor and approver.

@@ -13,8 +13,8 @@ database with Git ancestry and never resets, cleans, or rewrites refs.
 1. Look first. This changes nothing:
 
    ```sh
-   lprm --json recover --dry-run
-   lprm --json queue list
+   lgit --json recover --dry-run
+   lgit --json queue list
    ```
 
 2. Read the `merge_attempts` entries. Each has a classification:
@@ -28,10 +28,10 @@ database with Git ancestry and never resets, cleans, or rewrites refs.
 3. If the plan looks right, apply it:
 
    ```sh
-   lprm --json --actor hermes recover
+   lgit --json --actor hermes recover
    ```
 
-4. Confirm with `lprm --json pr show <pr-id>` and `lprm --json audit <pr-id>`.
+4. Confirm with `lgit --json pr show <pr-id>` and `lgit --json audit <pr-id>`.
 
 ## When it says needs operator review
 
@@ -43,6 +43,6 @@ LPRM refuses new merges until the attempt is resolved, by design.
 
 | Symptom | Action |
 | --- | --- |
-| Exit 7 `BUSY` that persists | Another process holds the repository lock or database. Check for a running `lprm queue run`; wait for it. Never delete the lock file. |
+| Exit 7 `BUSY` that persists | Another process holds the repository lock or database. Check for a running `lgit queue run`; wait for it. Never delete the lock file. |
 | `worktree_orphans` reported | A worktree exists in only one of Git or the database. Report it; do not remove it yourself. |
 | Exit 8 mentioning the database | State is corrupt or unreadable. Stop and tell the user; see the runbook. |
