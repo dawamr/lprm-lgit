@@ -6,6 +6,7 @@ use std::process::{Command, Output};
 
 use lprm_core::LprmError;
 use serde::Serialize;
+use tempfile::TempDir;
 
 const MINIMUM_GIT_VERSION: GitVersion = GitVersion {
     major: 2,
@@ -107,6 +108,120 @@ pub enum MergePreflight {
 #[derive(Clone, Debug)]
 pub struct Git {
     executable: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct IntegrationCandidate {
+    git: Git,
+    repository: PathBuf,
+    container: Option<TempDir>,
+    path: PathBuf,
+    commit_sha: String,
+    tree_sha: String,
+    target_sha: String,
+    source_sha: String,
+}
+
+impl IntegrationCandidate {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
+
+    pub fn tree_sha(&self) -> &str {
+        &self.tree_sha
+    }
+
+    pub fn target_sha(&self) -> &str {
+        &self.target_sha
+    }
+
+    pub fn source_sha(&self) -> &str {
+        &self.source_sha
+    }
+
+    fn merge_exact_source(&mut self) -> Result<(), LprmError> {
+        let merged = Command::new(&self.git.executable)
+            .arg("-C")
+            .arg(&self.path)
+            .args(["merge", "--no-ff", "--no-edit", "--no-gpg-sign"])
+            .arg(&self.source_sha)
+            .env("GIT_AUTHOR_NAME", "LPRM Coordinator")
+            .env("GIT_AUTHOR_EMAIL", "lprm@localhost")
+            .env("GIT_COMMITTER_NAME", "LPRM Coordinator")
+            .env("GIT_COMMITTER_EMAIL", "lprm@localhost")
+            .output()
+            .map_err(|_| LprmError::git_precondition("Git executable is unavailable"))?;
+        if !merged.status.success() {
+            return Err(LprmError::validation_failed(
+                "Git could not merge the exact source into the integration candidate",
+            ));
+        }
+        let commit = self
+            .git
+            .run(&self.path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+        let tree = self
+            .git
+            .run(&self.path, &["rev-parse", "--verify", "HEAD^{tree}"])?;
+        if !commit.status.success() || !tree.status.success() {
+            return Err(LprmError::git_precondition(
+                "Git could not inspect the integration candidate",
+            ));
+        }
+        self.commit_sha = parse_single_object_id(&commit.stdout, "candidate commit")?;
+        self.tree_sha = parse_single_object_id(&tree.stdout, "candidate tree")?;
+        let parents = self.git.run(
+            &self.path,
+            &["rev-list", "--parents", "-n", "1", &self.commit_sha],
+        )?;
+        if !parents.status.success() {
+            return Err(LprmError::git_precondition(
+                "Git could not inspect integration candidate parents",
+            ));
+        }
+        let object_ids = parse_parent_ids(&parents.stdout)?;
+        if object_ids
+            != [
+                self.commit_sha.clone(),
+                self.target_sha.clone(),
+                self.source_sha.clone(),
+            ]
+        {
+            return Err(LprmError::git_precondition(
+                "Integration candidate parents do not match the exact target and source",
+            ));
+        }
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<(), LprmError> {
+        if self.container.is_none() {
+            return Ok(());
+        }
+        let output = Command::new(&self.git.executable)
+            .arg("-C")
+            .arg(&self.repository)
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .output()
+            .map_err(|_| LprmError::git_precondition("Git executable is unavailable"))?;
+        if !output.status.success() {
+            return Err(LprmError::git_precondition(
+                "Git could not remove the disposable integration worktree",
+            ));
+        }
+        self.container.take();
+        Ok(())
+    }
+}
+
+impl Drop for IntegrationCandidate {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
 }
 
 impl Default for Git {
@@ -262,6 +377,65 @@ impl Git {
             ));
         }
         Ok(())
+    }
+
+    /// Builds a detached no-fast-forward merge candidate from two exact commits.
+    ///
+    /// The returned guard owns the disposable worktree and removes it, including dirty check
+    /// output, when dropped. The repository's target ref and coordinator checkout are untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Git precondition error when either commit is invalid, the worktree or merge cannot
+    /// be created, or the resulting commit does not have the exact target and source parents.
+    pub fn create_integration_candidate(
+        &self,
+        repository: &Path,
+        temporary_root: &Path,
+        target_sha: &str,
+        source_sha: &str,
+    ) -> Result<IntegrationCandidate, LprmError> {
+        self.verify_commit(repository, target_sha, "target")?;
+        self.verify_commit(repository, source_sha, "source")?;
+        if !temporary_root.is_dir() {
+            return Err(LprmError::git_precondition(
+                "Integration worktree root must be an existing directory",
+            ));
+        }
+        let container = tempfile::Builder::new()
+            .prefix("lprm-integration-")
+            .tempdir_in(temporary_root)
+            .map_err(|error| {
+                LprmError::internal(format!(
+                    "Unable to create disposable integration directory: {error}"
+                ))
+            })?;
+        let path = container.path().join("worktree");
+        let added = Command::new(&self.executable)
+            .arg("-C")
+            .arg(repository)
+            .args(["worktree", "add", "--detach"])
+            .arg(&path)
+            .arg(target_sha)
+            .output()
+            .map_err(|_| LprmError::git_precondition("Git executable is unavailable"))?;
+        if !added.status.success() {
+            return Err(LprmError::git_precondition(
+                "Git could not create the disposable integration worktree",
+            ));
+        }
+        let mut candidate = IntegrationCandidate {
+            git: self.clone(),
+            repository: repository.to_owned(),
+            container: Some(container),
+            path,
+            commit_sha: String::new(),
+            tree_sha: String::new(),
+            target_sha: target_sha.to_owned(),
+            source_sha: source_sha.to_owned(),
+        };
+        candidate.merge_exact_source()?;
+        Ok(candidate)
     }
 
     /// Inspects the current branch, HEAD, and dirty state of a registered worktree.
@@ -709,6 +883,37 @@ fn parse_object_ids(output: &[u8]) -> Result<Vec<String>, LprmError> {
             } else {
                 Err(LprmError::git_precondition(
                     "Git returned an invalid commit object ID",
+                ))
+            }
+        })
+        .collect()
+}
+
+fn parse_single_object_id(output: &[u8], role: &str) -> Result<String, LprmError> {
+    let object_id = std::str::from_utf8(output)
+        .map_err(|_| LprmError::git_precondition(format!("Git returned a non-UTF-8 {role}")))?
+        .trim();
+    if is_object_id(object_id) {
+        Ok(object_id.to_owned())
+    } else {
+        Err(LprmError::git_precondition(format!(
+            "Git returned an invalid {role} object ID"
+        )))
+    }
+}
+
+fn parse_parent_ids(output: &[u8]) -> Result<Vec<String>, LprmError> {
+    let output = std::str::from_utf8(output).map_err(|_| {
+        LprmError::git_precondition("Git returned non-UTF-8 integration candidate parents")
+    })?;
+    output
+        .split_whitespace()
+        .map(|value| {
+            if is_object_id(value) {
+                Ok(value.to_owned())
+            } else {
+                Err(LprmError::git_precondition(
+                    "Git returned an invalid integration candidate parent",
                 ))
             }
         })

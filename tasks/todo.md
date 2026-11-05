@@ -193,10 +193,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T18: Validate disposable integrated candidates
 
 **Acceptance criteria:**
-- [ ] A temporary detached worktree merges exact SHAs and runs required checks on the combined tree before target mutation.
+- [x] A temporary detached worktree merges exact SHAs and runs required checks on the combined tree before target mutation.
 
 **Verification:**
-- [ ] A pair of individually passing but jointly failing changes is blocked.
+- [x] A pair of individually passing but jointly failing changes is blocked.
 
 **Dependencies:** T14, T15, T17
 

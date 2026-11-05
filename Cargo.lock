@@ -418,6 +418,7 @@ name = "lprm-git"
 version = "0.1.0"
 dependencies = [
  "lprm-core",
+ "lprm-runner",
  "serde",
  "tempfile",
 ]
