@@ -1,5 +1,9 @@
 //! Validation command and reviewer adapters for LPRM.
 
+mod adapter;
+
+pub use adapter::{AdapterLimits, run_json_adapter};
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};

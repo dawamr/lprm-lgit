@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod review;
+
 use fs2::FileExt;
 use lprm_core::{AdmissionGates, LprmError, PullRequestStatus, RevisionFingerprint};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
