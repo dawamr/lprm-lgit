@@ -214,6 +214,19 @@ struct WorktreeCreateReport {
     owner_agent: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct WorktreeStatusReport {
+    id: String,
+    branch: String,
+    path: std::path::PathBuf,
+    owner_agent: Option<String>,
+    created_at: String,
+    present: bool,
+    actual_branch: Option<String>,
+    head_sha: Option<String>,
+    dirty: Option<bool>,
+}
+
 pub fn run() -> i32 {
     run_from(std::env::args_os())
 }
@@ -279,8 +292,10 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
         },
         Command::Worktree(arguments) => match &arguments.command {
             WorktreeCommand::Create(create) => create_worktree(create),
-            _ => Err(LprmError::internal(
-                "worktree command is not implemented yet",
+            WorktreeCommand::List => list_worktrees(),
+            WorktreeCommand::Status(status) => show_worktree_status(&status.id),
+            WorktreeCommand::Cleanup(_) => Err(LprmError::internal(
+                "worktree cleanup is not implemented yet",
             )),
         },
         _ => Err(LprmError::internal(format!(
@@ -288,6 +303,67 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             cli.command_name()
         ))),
     }
+}
+
+fn list_worktrees() -> Result<Value, LprmError> {
+    let (store, layout) = open_current_store()?;
+    let git = lprm_git::Git::default();
+    let reports = store
+        .list_worktrees(layout.repository_id())?
+        .into_iter()
+        .map(|record| observe_worktree(&git, record))
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_value(reports)
+        .map_err(|_| LprmError::internal("Worktree list serialization failed"))
+}
+
+fn show_worktree_status(worktree_id: &str) -> Result<Value, LprmError> {
+    let (store, layout) = open_current_store()?;
+    let record = store
+        .worktree(layout.repository_id(), worktree_id)?
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown worktree ID {worktree_id:?}"))
+        })?;
+    let report = observe_worktree(&lprm_git::Git::default(), record)?;
+    serde_json::to_value(report)
+        .map_err(|_| LprmError::internal("Worktree status serialization failed"))
+}
+
+fn open_current_store() -> Result<(lprm_store::Store, lprm_store::StateLayout), LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let repository = lprm_git::Git::default().discover(&current_directory)?;
+    let layout = lprm_store::StateLayout::for_repository(&repository.common_git_dir)?;
+    if !layout.database_path().is_file() {
+        return Err(LprmError::git_precondition(
+            "Repository is not initialized; run lprm init first",
+        ));
+    }
+    let store = lprm_store::Store::open(layout.database_path())?;
+    if store.repository_target(layout.repository_id())?.is_none() {
+        return Err(LprmError::git_precondition(
+            "Repository is not initialized; run lprm init first",
+        ));
+    }
+    Ok((store, layout))
+}
+
+fn observe_worktree(
+    git: &lprm_git::Git,
+    record: lprm_store::WorktreeRecord,
+) -> Result<WorktreeStatusReport, LprmError> {
+    let observation = git.observe_worktree(&record.absolute_path)?;
+    Ok(WorktreeStatusReport {
+        id: record.id,
+        branch: record.branch,
+        path: record.absolute_path,
+        owner_agent: record.owner_agent,
+        created_at: record.created_at,
+        present: observation.present,
+        actual_branch: observation.actual_branch,
+        head_sha: observation.head_sha,
+        dirty: observation.dirty,
+    })
 }
 
 fn create_worktree(arguments: &WorktreeCreateArgs) -> Result<Value, LprmError> {

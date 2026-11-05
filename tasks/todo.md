@@ -69,10 +69,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T06: List and inspect managed worktrees
 
 **Acceptance criteria:**
-- [ ] List/status reports ownership, branch, path, HEAD, dirty state, and missing registrations.
+- [x] List/status reports ownership, branch, path, HEAD, dirty state, and missing registrations.
 
 **Verification:**
-- [ ] Managed, dirty, and missing worktree tests pass.
+- [x] Managed, dirty, and missing worktree tests pass.
 
 **Dependencies:** T05
 

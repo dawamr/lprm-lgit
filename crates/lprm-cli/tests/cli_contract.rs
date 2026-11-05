@@ -249,6 +249,81 @@ fn worktree_create_builds_distinct_checkouts_from_the_exact_target() {
     assert_eq!(git_stdout(second_path, &["rev-parse", "HEAD"]), target_sha);
     assert_eq!(git_stdout(&repository, &["rev-parse", "dev"]), target_sha);
     assert_eq!(git_stdout(&repository, &["status", "--porcelain"]), "");
+
+    let listed = lprm_in_with_state(&repository, &state, &["--json", "worktree", "list"]);
+    let listed_document: Value =
+        serde_json::from_slice(&listed.stdout).expect("stdout should be JSON");
+    assert!(listed.status.success());
+    assert_eq!(
+        listed_document["data"]
+            .as_array()
+            .expect("list data should be an array")
+            .len(),
+        2
+    );
+    assert_eq!(listed_document["data"][0]["present"], true);
+    assert_eq!(listed_document["data"][0]["dirty"], false);
+
+    let first_id = first_document["data"]["id"]
+        .as_str()
+        .expect("worktree id should be a string");
+    let status = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "worktree", "status", first_id],
+    );
+    let status_document: Value =
+        serde_json::from_slice(&status.stdout).expect("stdout should be JSON");
+    assert!(status.status.success());
+    assert_eq!(status_document["data"]["id"], first_id);
+    assert_eq!(status_document["data"]["head_sha"], target_sha);
+
+    assert_dirty_and_missing_observations(
+        &repository,
+        &state,
+        first_path,
+        second_path,
+        &first_document["data"]["id"],
+        &second_document["data"]["id"],
+    );
+}
+
+fn assert_dirty_and_missing_observations(
+    repository: &Path,
+    state: &Path,
+    dirty_path: &Path,
+    missing_path: &Path,
+    dirty_id: &Value,
+    missing_id: &Value,
+) {
+    std::fs::write(dirty_path.join("untracked.txt"), "dirty\n")
+        .expect("dirty fixture should be written");
+    run_git(
+        repository,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            missing_path.to_str().expect("fixture path should be UTF-8"),
+        ],
+    );
+    let observed = lprm_in_with_state(repository, state, &["--json", "worktree", "list"]);
+    let observed_document: Value =
+        serde_json::from_slice(&observed.stdout).expect("stdout should be JSON");
+    let observed_items = observed_document["data"]
+        .as_array()
+        .expect("list data should be an array");
+    let dirty = observed_items
+        .iter()
+        .find(|item| &item["id"] == dirty_id)
+        .expect("dirty worktree should be listed");
+    let missing = observed_items
+        .iter()
+        .find(|item| &item["id"] == missing_id)
+        .expect("missing worktree should be listed");
+    assert_eq!(dirty["dirty"], true);
+    assert_eq!(missing["present"], false);
+    assert_eq!(missing["dirty"], Value::Null);
 }
 
 fn git_stdout(directory: &Path, args: &[&str]) -> String {

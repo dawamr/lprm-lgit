@@ -65,6 +65,14 @@ pub struct DoctorReport {
     pub merge_tree_write_tree: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WorktreeObservation {
+    pub present: bool,
+    pub actual_branch: Option<String>,
+    pub head_sha: Option<String>,
+    pub dirty: Option<bool>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Git {
     executable: PathBuf,
@@ -223,6 +231,61 @@ impl Git {
             ));
         }
         Ok(())
+    }
+
+    /// Inspects the current branch, HEAD, and dirty state of a registered worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Git precondition error when a present path cannot be inspected as a worktree.
+    pub fn observe_worktree(&self, worktree_path: &Path) -> Result<WorktreeObservation, LprmError> {
+        if !worktree_path.exists() {
+            return Ok(WorktreeObservation {
+                present: false,
+                actual_branch: None,
+                head_sha: None,
+                dirty: None,
+            });
+        }
+
+        let head = self.run(worktree_path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+        if !head.status.success() {
+            return Err(LprmError::git_precondition(format!(
+                "Registered worktree cannot resolve HEAD: {}",
+                worktree_path.display()
+            )));
+        }
+        let head_sha = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+        if !is_object_id(&head_sha) {
+            return Err(LprmError::git_precondition(
+                "Git returned an invalid worktree HEAD",
+            ));
+        }
+
+        let branch = self.run(
+            worktree_path,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        )?;
+        let actual_branch = branch
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&branch.stdout).trim().to_owned());
+        let status = self.run(
+            worktree_path,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )?;
+        if !status.status.success() {
+            return Err(LprmError::git_precondition(
+                "Registered worktree status inspection failed",
+            ));
+        }
+
+        Ok(WorktreeObservation {
+            present: true,
+            actual_branch,
+            head_sha: Some(head_sha),
+            dirty: Some(!status.stdout.is_empty()),
+        })
     }
 
     fn required_path(

@@ -154,6 +154,15 @@ pub struct StateLayout {
     lock_path: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorktreeRecord {
+    pub id: String,
+    pub branch: String,
+    pub absolute_path: PathBuf,
+    pub owner_agent: Option<String>,
+    pub created_at: String,
+}
+
 impl StateLayout {
     /// Resolves a repository-scoped layout beneath the configured platform state root.
     ///
@@ -327,6 +336,66 @@ impl Store {
             )
             .map_err(|error| persistence_error("register managed worktree", error))?;
         Ok(())
+    }
+
+    /// Lists active worktrees registered for a repository in creation order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when SQLite cannot query or decode worktree rows.
+    pub fn list_worktrees(&self, repository_id: &str) -> Result<Vec<WorktreeRecord>, LprmError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, branch, absolute_path, owner_agent, created_at \
+                 FROM worktrees \
+                 WHERE repository_id = ?1 AND cleaned_at IS NULL \
+                 ORDER BY created_at, id",
+            )
+            .map_err(|error| persistence_error("prepare managed worktree query", error))?;
+        let rows = statement
+            .query_map([repository_id], |row| {
+                Ok(WorktreeRecord {
+                    id: row.get(0)?,
+                    branch: row.get(1)?,
+                    absolute_path: PathBuf::from(row.get::<_, String>(2)?),
+                    owner_agent: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|error| persistence_error("query managed worktrees", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| persistence_error("decode managed worktrees", error))
+    }
+
+    /// Looks up one active worktree by repository and immutable worktree ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when SQLite cannot query or decode the worktree row.
+    pub fn worktree(
+        &self,
+        repository_id: &str,
+        worktree_id: &str,
+    ) -> Result<Option<WorktreeRecord>, LprmError> {
+        self.connection
+            .query_row(
+                "SELECT id, branch, absolute_path, owner_agent, created_at \
+                 FROM worktrees \
+                 WHERE repository_id = ?1 AND id = ?2 AND cleaned_at IS NULL",
+                (repository_id, worktree_id),
+                |row| {
+                    Ok(WorktreeRecord {
+                        id: row.get(0)?,
+                        branch: row.get(1)?,
+                        absolute_path: PathBuf::from(row.get::<_, String>(2)?),
+                        owner_agent: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| persistence_error("read managed worktree", error))
     }
 
     fn initialize(mut connection: Connection, file_backed: bool) -> Result<Self, LprmError> {
