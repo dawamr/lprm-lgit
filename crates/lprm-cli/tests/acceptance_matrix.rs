@@ -288,6 +288,33 @@ fn ac10_combined_tree_is_tested_before_integration() {
     assert_eq!(next["data"]["processed"], 0);
 }
 
+#[test]
+fn source_drift_after_enqueue_demotes_instead_of_reconciling() {
+    let fixture = Fixture::new("/usr/bin/true");
+    let submitted = fixture.submit("feature.txt");
+    fixture.approve_and_enqueue(&submitted.pr_id);
+    fs::write(submitted.path.join("late.txt"), "late\n").unwrap();
+    git(&submitted.path, &["add", "late.txt"]);
+    git(&submitted.path, &["commit", "-m", "late"]);
+    let target = git_stdout(&fixture.repository, &["rev-parse", "dev"]);
+
+    let run = fixture.json_success(&["--json", "queue", "run", "--once"]);
+
+    assert_eq!(run["data"]["processed"], 0);
+    assert_eq!(run["data"]["invalidated"][0], submitted.pr_id.as_str());
+    assert_eq!(fixture.status(&submitted.pr_id), "ready");
+    assert_eq!(
+        git_stdout(&fixture.repository, &["rev-parse", "dev"]),
+        target
+    );
+    assert_success(&fixture.lprm(&["--json", "pr", "sync", &submitted.pr_id]));
+    assert_success(&fixture.lprm(&["--json", "pr", "check", &submitted.pr_id]));
+    assert_success(&fixture.lprm(&["--json", "pr", "enqueue", &submitted.pr_id]));
+    let run = fixture.json_success(&["--json", "queue", "run", "--once"]);
+    assert_eq!(run["data"]["processed"], 1);
+    assert_eq!(fixture.status(&submitted.pr_id), "merged");
+}
+
 fn checkout_snapshot(repository: &Path) -> [String; 3] {
     [
         git_stdout(repository, &["status", "--porcelain=v1", "-uall"]),

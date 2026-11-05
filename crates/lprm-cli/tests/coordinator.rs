@@ -31,7 +31,7 @@ fn sequential_pull_requests_merge_once_with_exact_parent_chains() {
         .unwrap();
 
     let base_sha = git_stdout(&repository, &["rev-parse", "dev"]);
-    let source_one = create_source_commit(&repository, "feature/one", "one.txt", "one");
+    let source_one = create_source_commit(&repository, "feature/pr-1", "one.txt", "one");
     seed_queued_pr(
         &mut store,
         layout.repository_id(),
@@ -72,7 +72,7 @@ fn sequential_pull_requests_merge_once_with_exact_parent_chains() {
     assert_eq!(empty.invalidated, Vec::<String>::new());
     assert_eq!(git_stdout(&repository, &["rev-parse", "dev"]), first_target);
 
-    let source_two = create_source_commit(&repository, "feature/two", "two.txt", "two");
+    let source_two = create_source_commit(&repository, "feature/pr-2", "two.txt", "two");
     let mut store = Store::open(layout.database_path()).unwrap();
     seed_queued_pr(
         &mut store,

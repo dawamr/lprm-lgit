@@ -205,6 +205,8 @@ pub struct NewRevision {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StaleQueueInvalidation {
     pub current_target_sha: String,
+    /// Current source branch head per PR ID; a PR absent from the map is not source-checked.
+    pub current_source_shas: std::collections::BTreeMap<String, String>,
     pub audit_id_prefix: String,
     pub actor: String,
 }
@@ -1088,7 +1090,7 @@ impl Store {
             .ok_or_else(|| LprmError::internal("Revised pull request could not be read"))
     }
 
-    /// Demotes queued entries validated against a different target head back to `ready`.
+    /// Demotes queued entries whose validated target or source head moved back to `ready`.
     ///
     /// Callers hold the repository lock. Returns the affected PR IDs in queue order.
     ///
@@ -1108,11 +1110,11 @@ impl Store {
         let stale = {
             let mut statement = transaction
                 .prepare(
-                    "SELECT q.id, q.pr_id, r.id, r.target_sha \
+                    "SELECT q.id, q.pr_id, r.id, r.target_sha, r.source_sha \
                      FROM merge_queue q \
                      JOIN pull_requests p ON p.id = q.pr_id \
                      JOIN pr_revisions r ON r.id = q.revision_id AND r.pr_id = p.id \
-                     WHERE p.repository_id = ?1 AND q.status = 'queued' AND r.target_sha != ?2 \
+                     WHERE p.repository_id = ?1 AND q.status = 'queued' AND ?2 != '' \
                      ORDER BY q.priority DESC, q.enqueued_at, q.id",
                 )
                 .map_err(|error| persistence_error("prepare stale queue query", error))?;
@@ -1123,6 +1125,7 @@ impl Store {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
                     ])
                 })
                 .map_err(|error| persistence_error("query stale queue entries", error))?
@@ -1130,7 +1133,15 @@ impl Store {
                 .map_err(|error| persistence_error("decode stale queue entries", error))?
         };
         let mut invalidated = Vec::new();
-        for [queue_id, pr_id, revision_id, old_target] in stale {
+        for [queue_id, pr_id, revision_id, old_target, old_source] in stale {
+            let target_moved = old_target != request.current_target_sha;
+            let source_moved = request
+                .current_source_shas
+                .get(&pr_id)
+                .is_some_and(|current| *current != old_source);
+            if !target_moved && !source_moved {
+                continue;
+            }
             transaction
                 .execute(
                     "UPDATE merge_queue SET status = 'stale', \
@@ -1148,12 +1159,18 @@ impl Store {
                 )
                 .map_err(|error| persistence_error("return stale pull request to ready", error))?;
             let payload = json!({
-                "reason": "target branch moved after validation",
+                "reason": if target_moved {
+                    "target branch moved after validation"
+                } else {
+                    "source branch moved after validation"
+                },
                 "from": "queued",
                 "to": "ready",
                 "revision_id": revision_id,
                 "validated_target_sha": old_target,
                 "current_target_sha": request.current_target_sha,
+                "validated_source_sha": old_source,
+                "current_source_sha": request.current_source_shas.get(&pr_id),
             });
             insert_audit_event(
                 &transaction,

@@ -243,10 +243,30 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T29: Complete the offline end-to-end matrix
 
 **Acceptance criteria:**
-- [ ] All P0 acceptance criteria run in ephemeral repositories without remote, keys, or network.
+- [x] All P0 acceptance criteria run in ephemeral repositories without remote, keys, or network.
 
 **Verification:**
-- [ ] `cargo test --workspace --locked`
+- [x] `cargo test --workspace --locked`
+
+**AC to test index** (all under `crates/*/tests`, run offline in temporary repositories):
+
+| AC | Test |
+| --- | --- |
+| AC-01 | `cli_contract::init_persists_external_state_and_is_idempotent_without_a_remote` |
+| AC-02 | `cli_contract::worktree_create_builds_distinct_checkouts_from_the_exact_target` |
+| AC-03 | `cli_contract::pull_request_create_rejects_empty_dirty_and_missing_sources` |
+| AC-04 | `machine_contract::*`, `cli_contract::json_mode_*`, `machine_flow` (no prompts) |
+| AC-05 | `acceptance_matrix::ac05_conflict_preflight_leaves_the_checkout_untouched` |
+| AC-06 | `acceptance_matrix::ac06_failing_required_check_blocks_the_queue_and_keeps_logs` |
+| AC-07 | `acceptance_matrix::ac07_*`, `acceptance_matrix::source_drift_after_enqueue_*`, `evidence_freshness` |
+| AC-08 | `acceptance_matrix::ac08_concurrent_queue_runs_create_one_merge`, `merge_queue` lock test |
+| AC-09 | `acceptance_matrix::ac09_older_candidate_is_revalidated_against_the_new_target_head` |
+| AC-10 | `acceptance_matrix::ac10_combined_tree_is_tested_before_integration` |
+| AC-11 | `machine_flow::p0_machine_workflow_reaches_one_verified_merge_without_prompts`, `coordinator` |
+| AC-12 | `cli_contract::worktree_cleanup_is_dry_run_by_default_and_refuses_data_loss` |
+| AC-13 | `recovery::*` (before merge, during candidate, after Git success, unmatched target) |
+| AC-14 | `machine_contract::busy_and_internal_failures_keep_their_public_exit_codes`, `cli_contract::doctor_*` |
+| AC-15 | Whole suite: temporary repositories, no remote, keys, or network |
 
 **Dependencies:** T01–T20, T25, T26
 

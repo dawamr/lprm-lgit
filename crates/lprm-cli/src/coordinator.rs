@@ -209,10 +209,28 @@ pub fn run_once(options: &CoordinatorOptions<'_>) -> Result<RunOutcome, LprmErro
         .repository_target(options.layout.repository_id())?
         .ok_or_else(|| LprmError::git_precondition("Repository initialization is missing"))?;
     let current_target = Git::default().resolve_local_branch(options.repository, &target_branch)?;
+    let git = Git::default();
+    let mut current_source_shas = std::collections::BTreeMap::new();
+    for entry in store.list_merge_queue(options.layout.repository_id())? {
+        if entry.status != "queued" {
+            continue;
+        }
+        let Some(pull_request) =
+            store.pull_request(options.layout.repository_id(), &entry.pr_id)?
+        else {
+            continue;
+        };
+        // A missing or unreadable branch can never match the validated SHA, so it demotes too.
+        let head = git
+            .resolve_local_branch(options.repository, &pull_request.source_branch)
+            .unwrap_or_default();
+        current_source_shas.insert(entry.pr_id, head);
+    }
     let invalidated = store.invalidate_stale_queue_entries(
         options.layout.repository_id(),
         &StaleQueueInvalidation {
             current_target_sha: current_target,
+            current_source_shas,
             audit_id_prefix: format!("audit_{}", uuid::Uuid::now_v7().simple()),
             actor: options.actor.to_owned(),
         },
