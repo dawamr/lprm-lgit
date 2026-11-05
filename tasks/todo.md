@@ -89,10 +89,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T08: Detect orphaned worktrees
 
 **Acceptance criteria:**
-- [ ] Recovery classifies DB-only and Git-only worktree records and proposes non-destructive repairs.
+- [x] Recovery classifies DB-only and Git-only worktree records and proposes non-destructive repairs.
 
 **Verification:**
-- [ ] Orphan fixture tests pass.
+- [x] Orphan fixture tests pass.
 
 **Dependencies:** T06, T20
 

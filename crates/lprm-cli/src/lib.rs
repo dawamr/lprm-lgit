@@ -237,6 +237,21 @@ struct WorktreeCleanupReport {
     removed: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct WorktreeOrphanReport {
+    kind: &'static str,
+    worktree_id: Option<String>,
+    path: std::path::PathBuf,
+    branch: Option<String>,
+    suggested_action: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct RecoveryReport {
+    dry_run: bool,
+    worktree_orphans: Vec<WorktreeOrphanReport>,
+}
+
 pub fn run() -> i32 {
     run_from(std::env::args_os())
 }
@@ -306,11 +321,74 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             WorktreeCommand::Status(status) => show_worktree_status(&status.id),
             WorktreeCommand::Cleanup(cleanup) => cleanup_worktree(cleanup, cli.yes),
         },
+        Command::Recover(_) => recover_worktree_orphans(),
         _ => Err(LprmError::internal(format!(
             "{} is not implemented yet",
             cli.command_name()
         ))),
     }
+}
+
+fn recover_worktree_orphans() -> Result<Value, LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let repository = lprm_git::Git::default().discover(&current_directory)?;
+    let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
+    let (store, layout) = open_current_store()?;
+    let managed = store.list_worktrees(layout.repository_id())?;
+    let git_worktrees = lprm_git::Git::default().list_worktrees(&repository.worktree_root)?;
+    let mut orphans = Vec::new();
+
+    for record in &managed {
+        if !git_worktrees
+            .iter()
+            .any(|git| git.path == record.absolute_path)
+        {
+            orphans.push(WorktreeOrphanReport {
+                kind: "database_only",
+                worktree_id: Some(record.id.clone()),
+                path: record.absolute_path.clone(),
+                branch: Some(record.branch.clone()),
+                suggested_action: "inspect_then_mark_cleaned",
+            });
+        }
+    }
+
+    let configured_root = if config.repository.worktree_root.is_absolute() {
+        config.repository.worktree_root
+    } else {
+        repository
+            .worktree_root
+            .join(config.repository.worktree_root)
+    };
+    let canonical_root = std::fs::canonicalize(&configured_root).ok();
+    for git_worktree in git_worktrees {
+        let is_managed_path = canonical_root.as_ref().is_some_and(|root| {
+            std::fs::canonicalize(&git_worktree.path)
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent == root))
+                .unwrap_or(false)
+        });
+        let is_registered = managed
+            .iter()
+            .any(|record| record.absolute_path == git_worktree.path);
+        if is_managed_path && !is_registered {
+            orphans.push(WorktreeOrphanReport {
+                kind: "git_only",
+                worktree_id: None,
+                path: git_worktree.path,
+                branch: git_worktree.branch,
+                suggested_action: "inspect_then_register_or_remove",
+            });
+        }
+    }
+    orphans.sort_by(|left, right| left.path.cmp(&right.path));
+
+    serde_json::to_value(RecoveryReport {
+        dry_run: true,
+        worktree_orphans: orphans,
+    })
+    .map_err(|_| LprmError::internal("Recovery report serialization failed"))
 }
 
 fn cleanup_worktree(arguments: &WorktreeCleanupArgs, confirmed: bool) -> Result<Value, LprmError> {

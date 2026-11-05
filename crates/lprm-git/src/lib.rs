@@ -73,6 +73,13 @@ pub struct WorktreeObservation {
     pub dirty: Option<bool>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitWorktree {
+    pub path: PathBuf,
+    pub head_sha: Option<String>,
+    pub branch: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Git {
     executable: PathBuf,
@@ -349,6 +356,21 @@ impl Git {
         Ok(())
     }
 
+    /// Lists Git's registered worktrees using the stable porcelain NUL-delimited format.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Git precondition error when Git fails or returns malformed UTF-8 records.
+    pub fn list_worktrees(&self, repository: &Path) -> Result<Vec<GitWorktree>, LprmError> {
+        let output = self.run(repository, &["worktree", "list", "--porcelain", "-z"])?;
+        if !output.status.success() {
+            return Err(LprmError::git_precondition(
+                "Git worktree registry inspection failed",
+            ));
+        }
+        parse_worktree_porcelain(&output.stdout)
+    }
+
     fn required_path(
         &self,
         path: &Path,
@@ -454,6 +476,43 @@ fn is_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn parse_worktree_porcelain(output: &[u8]) -> Result<Vec<GitWorktree>, LprmError> {
+    let mut records = Vec::new();
+    let mut current: Option<GitWorktree> = None;
+    for field in output.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            if let Some(record) = current.take() {
+                records.push(record);
+            }
+            continue;
+        }
+        let field = std::str::from_utf8(field).map_err(|_| {
+            LprmError::git_precondition("Git worktree registry contains a non-UTF-8 path")
+        })?;
+        if let Some(path) = field.strip_prefix("worktree ") {
+            if let Some(record) = current.replace(GitWorktree {
+                path: PathBuf::from(path),
+                head_sha: None,
+                branch: None,
+            }) {
+                records.push(record);
+            }
+        } else if let Some(head) = field.strip_prefix("HEAD ") {
+            if let Some(record) = current.as_mut() {
+                record.head_sha = Some(head.to_owned());
+            }
+        } else if let Some(branch) = field.strip_prefix("branch refs/heads/")
+            && let Some(record) = current.as_mut()
+        {
+            record.branch = Some(branch.to_owned());
+        }
+    }
+    if let Some(record) = current {
+        records.push(record);
+    }
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -462,7 +521,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{Git, GitVersion};
+    use super::{Git, GitVersion, parse_worktree_porcelain};
 
     fn run_git(path: &Path, arguments: &[&str]) {
         let status = Command::new("git")
@@ -545,5 +604,17 @@ mod tests {
             .expect("repository should be discovered");
 
         assert!(info.has_submodules);
+    }
+
+    #[test]
+    fn parses_nul_delimited_worktree_porcelain() {
+        let records = parse_worktree_porcelain(
+            b"worktree /repo\0HEAD 0123456789012345678901234567890123456789\0branch refs/heads/dev\0\0",
+        )
+        .expect("porcelain should parse");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].path, Path::new("/repo"));
+        assert_eq!(records[0].branch.as_deref(), Some("dev"));
     }
 }

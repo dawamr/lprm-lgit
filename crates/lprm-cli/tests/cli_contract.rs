@@ -382,6 +382,71 @@ fn worktree_cleanup_is_dry_run_by_default_and_refuses_data_loss() {
     assert!(!clean_path.exists());
 }
 
+#[test]
+fn recover_reports_database_only_and_git_only_worktrees_without_mutation() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    std::fs::create_dir(&repository).expect("repository directory should be created");
+    initialize_repository(&repository);
+    assert!(
+        lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"])
+            .status
+            .success()
+    );
+    let created = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "worktree",
+            "create",
+            "--task",
+            "Missing registration fixture",
+        ],
+    );
+    let created_document: Value =
+        serde_json::from_slice(&created.stdout).expect("stdout should be JSON");
+    let missing_path = created_document["data"]["path"]
+        .as_str()
+        .expect("worktree path should be a string");
+    run_git(
+        &repository,
+        &["worktree", "remove", "--force", missing_path],
+    );
+
+    let git_only_path = fixture.path().join(".lprm-worktrees/manual-orphan");
+    run_git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "manual/orphan",
+            git_only_path
+                .to_str()
+                .expect("fixture path should be UTF-8"),
+            "dev",
+        ],
+    );
+
+    let recovered = lprm_in_with_state(&repository, &state, &["--json", "recover", "--dry-run"]);
+    let recovered_document: Value =
+        serde_json::from_slice(&recovered.stdout).expect("stdout should be JSON");
+    assert!(recovered.status.success());
+    let orphans = recovered_document["data"]["worktree_orphans"]
+        .as_array()
+        .expect("orphans should be an array");
+    assert!(
+        orphans
+            .iter()
+            .any(|orphan| orphan["kind"] == "database_only")
+    );
+    assert!(orphans.iter().any(|orphan| orphan["kind"] == "git_only"));
+    assert!(git_only_path.exists());
+}
+
 fn assert_dirty_and_missing_observations(
     repository: &Path,
     state: &Path,
