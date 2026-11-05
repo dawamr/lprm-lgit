@@ -220,6 +220,23 @@ pub struct StartMergeAttempt {
     pub actor: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateMergeEvidence {
+    pub attempt_id: String,
+    pub candidate_commit_sha: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompleteMergeAttempt {
+    pub attempt_id: String,
+    pub audit_id: String,
+    pub actor: String,
+    pub target_before_sha: String,
+    pub source_sha: String,
+    pub candidate_commit_sha: String,
+    pub target_after_sha: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PullRequestRevisionRecord {
     pub id: String,
@@ -309,6 +326,16 @@ struct QueuedMergeRow {
     status: String,
     target_sha: String,
     source_sha: String,
+}
+
+struct MergeCompletionRow {
+    state: String,
+    target_before_sha: String,
+    source_sha: String,
+    candidate_commit_sha: Option<String>,
+    queue_id: String,
+    pull_request_id: String,
+    pull_request_status: String,
 }
 
 impl StateLayout {
@@ -1194,6 +1221,76 @@ impl Store {
             .map(Some)
     }
 
+    /// Persists the exact candidate commit after integrated checks pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for malformed evidence or an attempt outside `preparing`, and an
+    /// internal error when the atomic update cannot be committed.
+    pub fn record_candidate_ready(
+        &mut self,
+        repository_id: &str,
+        evidence: &CandidateMergeEvidence,
+    ) -> Result<MergeAttemptRecord, LprmError> {
+        ensure_object_id(&evidence.candidate_commit_sha, "candidate commit")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| persistence_error("start candidate evidence transaction", error))?;
+        let changed = transaction
+            .execute(
+                "UPDATE merge_attempts \
+                 SET candidate_commit_sha = ?1, state = 'integrating' \
+                 WHERE repository_id = ?2 AND id = ?3 AND state = 'preparing' \
+                   AND candidate_commit_sha IS NULL",
+                (
+                    &evidence.candidate_commit_sha,
+                    repository_id,
+                    &evidence.attempt_id,
+                ),
+            )
+            .map_err(|error| persistence_error("record candidate evidence", error))?;
+        if changed != 1 {
+            return Err(LprmError::validation_failed(
+                "Merge attempt is not awaiting candidate evidence",
+            ));
+        }
+        transaction
+            .commit()
+            .map_err(|error| persistence_error("commit candidate evidence", error))?;
+        self.merge_attempt_record(repository_id, &evidence.attempt_id)?
+            .ok_or_else(|| LprmError::internal("Updated merge attempt could not be read"))
+    }
+
+    /// Atomically completes a verified Git merge across attempt, queue, PR, and audit records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale-revision error when any exact SHA differs from persisted evidence, a
+    /// validation error for an ineligible attempt, or an internal error on transaction failure.
+    pub fn complete_merge_attempt(
+        &mut self,
+        repository_id: &str,
+        request: &CompleteMergeAttempt,
+    ) -> Result<MergeAttemptRecord, LprmError> {
+        ensure_completion_object_ids(request)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| persistence_error("start merge completion transaction", error))?;
+        let row = merge_completion_row(&transaction, repository_id, &request.attempt_id)?;
+        validate_merge_completion(&row, request)?;
+        update_completed_attempt(&transaction, repository_id, request)?;
+        update_completed_queue(&transaction, &row.queue_id)?;
+        update_merged_pull_request(&transaction, repository_id, &row.pull_request_id)?;
+        record_merge_completion_audit(&transaction, repository_id, &row, request)?;
+        transaction
+            .commit()
+            .map_err(|error| persistence_error("commit merge completion", error))?;
+        self.merge_attempt_record(repository_id, &request.attempt_id)?
+            .ok_or_else(|| LprmError::internal("Completed merge attempt could not be read"))
+    }
+
     /// Lists merge attempts for a repository in start order.
     ///
     /// # Errors
@@ -1509,6 +1606,184 @@ fn record_merge_attempt_audit(
         )
         .map_err(|error| persistence_error("record merge attempt audit", error))?;
     Ok(())
+}
+
+fn merge_completion_row(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    attempt_id: &str,
+) -> Result<MergeCompletionRow, LprmError> {
+    transaction
+        .query_row(
+            "SELECT a.state, a.target_before_sha, a.source_sha, a.candidate_commit_sha, \
+                    q.id, q.pr_id, p.status \
+             FROM merge_attempts a \
+             JOIN merge_queue q ON q.id = a.queue_id \
+             JOIN pull_requests p ON p.id = q.pr_id \
+             WHERE a.repository_id = ?1 AND a.id = ?2 AND p.repository_id = ?1",
+            (repository_id, attempt_id),
+            |row| {
+                Ok(MergeCompletionRow {
+                    state: row.get(0)?,
+                    target_before_sha: row.get(1)?,
+                    source_sha: row.get(2)?,
+                    candidate_commit_sha: row.get(3)?,
+                    queue_id: row.get(4)?,
+                    pull_request_id: row.get(5)?,
+                    pull_request_status: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| persistence_error("read merge completion evidence", error))?
+        .ok_or_else(|| LprmError::invalid_argument("Unknown merge attempt ID"))
+}
+
+fn validate_merge_completion(
+    row: &MergeCompletionRow,
+    request: &CompleteMergeAttempt,
+) -> Result<(), LprmError> {
+    if row.state != "integrating" {
+        return Err(LprmError::validation_failed(
+            "Merge attempt is not ready for completion",
+        ));
+    }
+    let status = parse_pull_request_status(&row.pull_request_status)?;
+    status.transition_to(PullRequestStatus::Merged)?;
+    if row.target_before_sha != request.target_before_sha
+        || row.source_sha != request.source_sha
+        || row.candidate_commit_sha.as_deref() != Some(request.candidate_commit_sha.as_str())
+    {
+        return Err(LprmError::stale_revision(
+            "Verified merge evidence does not match the active attempt",
+        ));
+    }
+    Ok(())
+}
+
+fn update_completed_attempt(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    request: &CompleteMergeAttempt,
+) -> Result<(), LprmError> {
+    let changed = transaction
+        .execute(
+            "UPDATE merge_attempts \
+             SET target_after_sha = ?1, state = 'succeeded', error_code = NULL, \
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE repository_id = ?2 AND id = ?3 AND state = 'integrating' \
+               AND target_before_sha = ?4 AND source_sha = ?5 AND candidate_commit_sha = ?6",
+            (
+                &request.target_after_sha,
+                repository_id,
+                &request.attempt_id,
+                &request.target_before_sha,
+                &request.source_sha,
+                &request.candidate_commit_sha,
+            ),
+        )
+        .map_err(|error| persistence_error("complete merge attempt", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LprmError::stale_revision(
+            "Merge attempt changed before completion",
+        ))
+    }
+}
+
+fn update_completed_queue(transaction: &Transaction<'_>, queue_id: &str) -> Result<(), LprmError> {
+    let changed = transaction
+        .execute(
+            "UPDATE merge_queue \
+             SET status = 'completed', finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?1 AND status = 'started'",
+            [queue_id],
+        )
+        .map_err(|error| persistence_error("complete merge queue entry", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LprmError::internal(
+            "Merge queue entry changed before completion",
+        ))
+    }
+}
+
+fn update_merged_pull_request(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    pull_request_id: &str,
+) -> Result<(), LprmError> {
+    let changed = transaction
+        .execute(
+            "UPDATE pull_requests \
+             SET status = 'merged', merged_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE repository_id = ?1 AND id = ?2 AND status = 'merging'",
+            (repository_id, pull_request_id),
+        )
+        .map_err(|error| persistence_error("mark pull request merged", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LprmError::internal(
+            "Pull request changed before merge completion",
+        ))
+    }
+}
+
+fn record_merge_completion_audit(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    row: &MergeCompletionRow,
+    request: &CompleteMergeAttempt,
+) -> Result<(), LprmError> {
+    let payload = json!({
+        "from": "merging",
+        "to": "merged",
+        "attempt_id": request.attempt_id,
+        "queue_id": row.queue_id,
+        "target_before_sha": request.target_before_sha,
+        "source_sha": request.source_sha,
+        "candidate_commit_sha": request.candidate_commit_sha,
+        "target_after_sha": request.target_after_sha,
+    });
+    transaction
+        .execute(
+            "INSERT INTO audit_events(\
+                id, repository_id, pr_id, event_type, actor, payload_json, created_at\
+             ) VALUES (\
+                ?1, ?2, ?3, 'merge_completed', ?4, ?5, \
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+             )",
+            (
+                &request.audit_id,
+                repository_id,
+                &row.pull_request_id,
+                &request.actor,
+                payload.to_string(),
+            ),
+        )
+        .map_err(|error| persistence_error("record merge completion audit", error))?;
+    Ok(())
+}
+
+fn ensure_completion_object_ids(request: &CompleteMergeAttempt) -> Result<(), LprmError> {
+    ensure_object_id(&request.target_before_sha, "target before")?;
+    ensure_object_id(&request.source_sha, "source")?;
+    ensure_object_id(&request.candidate_commit_sha, "candidate commit")?;
+    ensure_object_id(&request.target_after_sha, "target after")
+}
+
+fn ensure_object_id(value: &str, role: &str) -> Result<(), LprmError> {
+    if matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(LprmError::validation_failed(format!(
+            "Merge {role} is not a full object ID"
+        )))
+    }
 }
 
 fn queue_admission_row(

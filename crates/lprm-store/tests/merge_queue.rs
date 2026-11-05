@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use lprm_core::{AdmissionGates, ErrorCode, PullRequestStatus, RevisionFingerprint};
 use lprm_store::{
-    EnqueuePullRequest, MergeQueueRecord, NewPullRequest, RepositoryLock, StartMergeAttempt, Store,
-    TransitionEvidence,
+    CandidateMergeEvidence, CompleteMergeAttempt, EnqueuePullRequest, MergeQueueRecord,
+    NewPullRequest, RepositoryLock, StartMergeAttempt, Store, TransitionEvidence,
 };
 use serde_json::Value;
 use tempfile::tempdir;
@@ -98,6 +98,37 @@ fn admission() -> EnqueuePullRequest {
     }
 }
 
+fn started_store() -> Store {
+    let mut store = approved_store();
+    store
+        .enqueue_pull_request("repo-1", "pr-1", &admission())
+        .expect("approved PR should enqueue");
+    store
+        .start_next_merge_attempt(
+            "repo-1",
+            &StartMergeAttempt {
+                attempt_id: "attempt-1".to_owned(),
+                audit_id: "audit-attempt".to_owned(),
+                actor: "coordinator".to_owned(),
+            },
+        )
+        .expect("queued PR should start")
+        .expect("queue should contain one PR");
+    store
+}
+
+fn completion() -> CompleteMergeAttempt {
+    CompleteMergeAttempt {
+        attempt_id: "attempt-1".to_owned(),
+        audit_id: "audit-complete".to_owned(),
+        actor: "coordinator".to_owned(),
+        target_before_sha: "0000000000000000000000000000000000000000".to_owned(),
+        source_sha: "1111111111111111111111111111111111111111".to_owned(),
+        candidate_commit_sha: "2222222222222222222222222222222222222222".to_owned(),
+        target_after_sha: "3333333333333333333333333333333333333333".to_owned(),
+    }
+}
+
 #[test]
 fn enqueue_atomically_records_queue_status_and_audit() {
     let mut store = approved_store();
@@ -179,6 +210,127 @@ fn enqueue_rejects_each_unmet_gate_and_stale_evidence_without_mutation() {
             .status,
         PullRequestStatus::Approved
     );
+}
+
+#[test]
+fn candidate_evidence_advances_attempt_to_integrating() {
+    let mut store = started_store();
+
+    let attempt = store
+        .record_candidate_ready(
+            "repo-1",
+            &CandidateMergeEvidence {
+                attempt_id: "attempt-1".to_owned(),
+                candidate_commit_sha: "2222222222222222222222222222222222222222".to_owned(),
+            },
+        )
+        .expect("candidate evidence should persist");
+
+    assert_eq!(attempt.state, "integrating");
+    assert_eq!(
+        attempt.candidate_commit_sha.as_deref(),
+        Some("2222222222222222222222222222222222222222")
+    );
+    assert_eq!(attempt.target_after_sha, None);
+}
+
+#[test]
+fn completion_atomically_finishes_attempt_queue_pr_and_audit() {
+    let mut store = started_store();
+    store
+        .record_candidate_ready(
+            "repo-1",
+            &CandidateMergeEvidence {
+                attempt_id: "attempt-1".to_owned(),
+                candidate_commit_sha: "2222222222222222222222222222222222222222".to_owned(),
+            },
+        )
+        .unwrap();
+
+    let completed = store
+        .complete_merge_attempt("repo-1", &completion())
+        .expect("verified merge should complete");
+
+    assert_eq!(completed.state, "succeeded");
+    assert_eq!(
+        completed.target_after_sha.as_deref(),
+        Some("3333333333333333333333333333333333333333")
+    );
+    assert!(completed.finished_at.is_some());
+    assert_eq!(
+        store.list_merge_queue("repo-1").unwrap()[0].status,
+        "completed"
+    );
+    assert_eq!(
+        store
+            .pull_request("repo-1", "pr-1")
+            .unwrap()
+            .unwrap()
+            .status,
+        PullRequestStatus::Merged
+    );
+    let audit = store.audit_events("repo-1", Some("pr-1")).unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|event| event.event_type == "merge_completed")
+    );
+}
+
+#[test]
+fn completion_rejects_mismatched_sha_evidence_without_mutation() {
+    let mismatches = [
+        (
+            "target_before_sha",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        ("source_sha", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        (
+            "candidate_commit_sha",
+            "cccccccccccccccccccccccccccccccccccccccc",
+        ),
+    ];
+    for (field, wrong_sha) in mismatches {
+        let mut store = started_store();
+        store
+            .record_candidate_ready(
+                "repo-1",
+                &CandidateMergeEvidence {
+                    attempt_id: "attempt-1".to_owned(),
+                    candidate_commit_sha: "2222222222222222222222222222222222222222".to_owned(),
+                },
+            )
+            .unwrap();
+        let mut request = completion();
+        match field {
+            "target_before_sha" => request.target_before_sha = wrong_sha.to_owned(),
+            "source_sha" => request.source_sha = wrong_sha.to_owned(),
+            "candidate_commit_sha" => request.candidate_commit_sha = wrong_sha.to_owned(),
+            _ => unreachable!(),
+        }
+
+        let error = store
+            .complete_merge_attempt("repo-1", &request)
+            .expect_err("mismatched evidence must fail");
+
+        assert_eq!(error.code, ErrorCode::StaleRevision);
+        assert_eq!(
+            store.list_merge_attempts("repo-1").unwrap()[0].state,
+            "integrating"
+        );
+        assert_eq!(
+            store.list_merge_queue("repo-1").unwrap()[0].status,
+            "started"
+        );
+        assert_eq!(
+            store
+                .pull_request("repo-1", "pr-1")
+                .unwrap()
+                .unwrap()
+                .status,
+            PullRequestStatus::Merging
+        );
+    }
 }
 
 #[test]
