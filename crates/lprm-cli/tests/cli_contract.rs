@@ -28,6 +28,21 @@ fn lprm_in_with_state(directory: &Path, state: &Path, args: &[&str]) -> std::pro
         .expect("lprm should start")
 }
 
+fn lprm_in_with_identity_env(
+    directory: &Path,
+    state: &Path,
+    identity: &str,
+    args: &[&str],
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_lprm"))
+        .current_dir(directory)
+        .env("LPRM_STATE_HOME", state)
+        .env("LPRM_ACTOR", identity)
+        .args(args)
+        .output()
+        .expect("lprm should start")
+}
+
 fn run_git(directory: &Path, args: &[&str]) {
     let status = Command::new("git")
         .current_dir(directory)
@@ -319,6 +334,124 @@ fn worktree_create_builds_distinct_checkouts_from_the_exact_target() {
         &first_document["data"]["id"],
         &second_document["data"]["id"],
     );
+}
+
+#[test]
+fn caller_identity_is_the_default_worktree_owner() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    std::fs::create_dir(&repository).expect("repository directory should be created");
+    initialize_repository(&repository);
+    assert!(
+        lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"])
+            .status
+            .success()
+    );
+
+    let explicit = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "--actor",
+            "codex",
+            "worktree",
+            "create",
+            "--task",
+            "Explicit identity",
+        ],
+    );
+    let explicit_document: Value = serde_json::from_slice(&explicit.stdout).unwrap();
+    assert!(explicit.status.success());
+    assert_eq!(explicit_document["data"]["owner_agent"], "codex");
+
+    let from_environment = lprm_in_with_identity_env(
+        &repository,
+        &state,
+        "hermes",
+        &[
+            "--json",
+            "worktree",
+            "create",
+            "--task",
+            "Environment identity",
+        ],
+    );
+    let environment_document: Value = serde_json::from_slice(&from_environment.stdout).unwrap();
+    assert!(from_environment.status.success());
+    assert_eq!(environment_document["data"]["owner_agent"], "hermes");
+
+    let mismatch = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "--actor",
+            "codex",
+            "worktree",
+            "create",
+            "--task",
+            "Mismatched identity",
+            "--agent",
+            "hermes",
+        ],
+    );
+    let mismatch_document: Value = serde_json::from_slice(&mismatch.stdout).unwrap();
+    assert_eq!(mismatch.status.code(), Some(2));
+    assert_eq!(mismatch_document["error"]["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
+fn worktree_ownership_rejects_cross_agent_mutations() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    std::fs::create_dir(&repository).expect("repository directory should be created");
+    initialize_repository(&repository);
+    assert!(
+        lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"])
+            .status
+            .success()
+    );
+    let created = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "--actor",
+            "codex",
+            "worktree",
+            "create",
+            "--task",
+            "Owned cleanup",
+        ],
+    );
+    let document: Value = serde_json::from_slice(&created.stdout).unwrap();
+    let id = document["data"]["id"].as_str().unwrap();
+    let path = Path::new(document["data"]["path"].as_str().unwrap());
+
+    let refused = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json", "--actor", "hermes", "--yes", "worktree", "cleanup", id,
+        ],
+    );
+    let refused_document: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refused.status.code(), Some(5));
+    assert_eq!(refused_document["error"]["code"], "VALIDATION_FAILED");
+    assert!(path.exists());
+
+    let removed = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json", "--actor", "codex", "--yes", "worktree", "cleanup", id,
+        ],
+    );
+    assert!(removed.status.success());
+    assert!(!path.exists());
 }
 
 #[test]
@@ -619,6 +752,86 @@ fn pull_request_lifecycle_persists_and_uses_the_exact_revision() {
     assert_eq!(stat_document["data"]["patch"], Value::Null);
 
     assert_close_and_audit(&repository, &state, pr_id, &source_sha);
+}
+
+#[test]
+fn pull_request_creation_enforces_owner_and_actions_audit_the_caller() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    std::fs::create_dir(&repository).expect("repository directory should be created");
+    initialize_repository(&repository);
+    assert!(
+        lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"])
+            .status
+            .success()
+    );
+    let created_worktree = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "--actor",
+            "codex",
+            "worktree",
+            "create",
+            "--task",
+            "Owned pull request",
+        ],
+    );
+    let worktree_document: Value = serde_json::from_slice(&created_worktree.stdout).unwrap();
+    let source_path = PathBuf::from(worktree_document["data"]["path"].as_str().unwrap());
+    let source_branch = worktree_document["data"]["branch"].as_str().unwrap();
+    std::fs::write(source_path.join("owned.txt"), "owned\n").unwrap();
+    run_git(&source_path, &["add", "--", "owned.txt"]);
+    run_git(&source_path, &["commit", "--quiet", "-m", "owned change"]);
+
+    let refused = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "--actor",
+            "hermes",
+            "pr",
+            "create",
+            "--from",
+            source_branch,
+            "--title",
+            "Wrong owner",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(5));
+
+    let created_pr = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "--actor",
+            "codex",
+            "pr",
+            "create",
+            "--from",
+            source_branch,
+            "--title",
+            "Owned change",
+        ],
+    );
+    let pr_document: Value = serde_json::from_slice(&created_pr.stdout).unwrap();
+    assert!(created_pr.status.success());
+    let pr_id = pr_document["data"]["pr_id"].as_str().unwrap();
+
+    let closed = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "--actor", "operator", "pr", "close", pr_id],
+    );
+    assert!(closed.status.success());
+    let audit = lprm_in_with_state(&repository, &state, &["--json", "audit", pr_id]);
+    let audit_document: Value = serde_json::from_slice(&audit.stdout).unwrap();
+    assert_eq!(audit_document["data"][0]["actor"], "codex");
+    assert_eq!(audit_document["data"][1]["actor"], "operator");
 }
 
 fn assert_close_and_audit(repository: &Path, state: &Path, pr_id: &str, source_sha: &str) {

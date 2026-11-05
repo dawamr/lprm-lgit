@@ -27,7 +27,15 @@ fn p0_machine_workflow_reaches_one_verified_merge_without_prompts() {
     let created_worktree = json_success(&lprm(
         &repository,
         &state,
-        &["--json", "worktree", "create", "--task", "machine flow"],
+        &[
+            "--json",
+            "--actor",
+            "codex",
+            "worktree",
+            "create",
+            "--task",
+            "machine flow",
+        ],
     ));
     let source_path = created_worktree["data"]["path"].as_str().unwrap();
     let source_branch = created_worktree["data"]["branch"].as_str().unwrap();
@@ -41,6 +49,8 @@ fn p0_machine_workflow_reaches_one_verified_merge_without_prompts() {
         &state,
         &[
             "--json",
+            "--actor",
+            "codex",
             "pr",
             "create",
             "--from",
@@ -54,31 +64,50 @@ fn p0_machine_workflow_reaches_one_verified_merge_without_prompts() {
     let ready = json_success(&lprm(
         &repository,
         &state,
-        &["--json", "pr", "ready", pr_id],
+        &["--json", "--actor", "validator", "pr", "ready", pr_id],
     ));
     assert_eq!(ready["data"]["status"], "ready");
     let checked = json_success(&lprm(
         &repository,
         &state,
-        &["--json", "pr", "check", pr_id],
+        &["--json", "--actor", "validator", "pr", "check", pr_id],
     ));
     assert_eq!(checked["data"]["pull_request"]["status"], "approved");
     assert_eq!(checked["data"]["suite"]["passed"], true);
     let queued = json_success(&lprm(
         &repository,
         &state,
-        &["--json", "pr", "enqueue", pr_id],
+        &["--json", "--actor", "coordinator", "pr", "enqueue", pr_id],
     ));
     assert_eq!(queued["data"]["status"], "queued");
     let run = json_success(&lprm(
         &repository,
         &state,
-        &["--json", "queue", "run", "--once"],
+        &["--json", "--actor", "merger", "queue", "run", "--once"],
     ));
     assert_eq!(run["data"]["processed"], 1);
     assert_eq!(run["data"]["attempts"][0]["attempt"]["state"], "succeeded");
     let shown = json_success(&lprm(&repository, &state, &["--json", "pr", "show", pr_id]));
     assert_eq!(shown["data"]["status"], "merged");
+    let audit = json_success(&lprm(&repository, &state, &["--json", "audit", pr_id]));
+    let actors = audit["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["actor"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actors,
+        [
+            "codex",
+            "validator",
+            "validator",
+            "validator",
+            "coordinator",
+            "merger",
+            "merger"
+        ]
+    );
 
     let target_after = git_stdout(&repository, &["rev-parse", "dev"]);
     assert_eq!(

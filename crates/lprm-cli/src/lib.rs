@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
-use lprm_core::{Envelope, LprmError};
+use lprm_core::{AgentIdentity, Envelope, LprmError};
 use serde::Serialize;
 use serde_json::Value;
 use tracing::error;
@@ -28,6 +28,10 @@ pub struct Cli {
 
     #[arg(long, global = true)]
     pub yes: bool,
+
+    /// Self-declared caller identity used for ownership and audit attribution.
+    #[arg(long, global = true)]
+    pub actor: Option<String>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -301,6 +305,7 @@ where
 }
 
 fn execute(cli: &Cli) -> Result<Value, LprmError> {
+    let actor = caller_identity(cli)?;
     match &cli.command {
         Command::Init(arguments) => initialize_repository(arguments),
         Command::Doctor => {
@@ -321,32 +326,76 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             }
         },
         Command::Worktree(arguments) => match &arguments.command {
-            WorktreeCommand::Create(create) => create_worktree(create),
+            WorktreeCommand::Create(create) => create_worktree(create, &actor),
             WorktreeCommand::List => list_worktrees(),
             WorktreeCommand::Status(status) => show_worktree_status(&status.id),
-            WorktreeCommand::Cleanup(cleanup) => cleanup_worktree(cleanup, cli.yes),
+            WorktreeCommand::Cleanup(cleanup) => cleanup_worktree(cleanup, cli.yes, &actor),
         },
         Command::Pr(arguments) => match &arguments.command {
-            PrCommand::Create(create) => create_pull_request(create),
+            PrCommand::Create(create) => create_pull_request(create, &actor),
             PrCommand::List(list) => list_pull_requests(list),
             PrCommand::Show(show) => show_pull_request(&show.id),
             PrCommand::Diff(diff) => diff_pull_request(diff),
-            PrCommand::Ready(ready) => mark_pull_request_ready(&ready.id),
-            PrCommand::Check(check) => check_pull_request(&check.id),
-            PrCommand::Enqueue(enqueue) => enqueue_pull_request(&enqueue.id),
-            PrCommand::Close(close) => close_pull_request(close),
+            PrCommand::Ready(ready) => mark_pull_request_ready(&ready.id, &actor),
+            PrCommand::Check(check) => check_pull_request(&check.id, &actor),
+            PrCommand::Enqueue(enqueue) => enqueue_pull_request(&enqueue.id, &actor),
+            PrCommand::Close(close) => close_pull_request(close, &actor),
             _ => Err(LprmError::internal("PR operation is not implemented yet")),
         },
         Command::Audit(arguments) => show_audit_events(&arguments.id),
-        Command::Recover(arguments) => recover_repository(arguments),
+        Command::Recover(arguments) => recover_repository(arguments, &actor),
         Command::Queue(arguments) => match &arguments.command {
             QueueCommand::List => list_merge_queue(),
-            QueueCommand::Run(run) => run_merge_queue(run),
+            QueueCommand::Run(run) => run_merge_queue(run, &actor),
         },
     }
 }
 
-fn mark_pull_request_ready(pull_request_id: &str) -> Result<Value, LprmError> {
+fn caller_identity(cli: &Cli) -> Result<AgentIdentity, LprmError> {
+    let legacy_agent = match &cli.command {
+        Command::Worktree(WorktreeArgs {
+            command: WorktreeCommand::Create(arguments),
+        }) => arguments.agent.as_deref(),
+        _ => None,
+    };
+    if let (Some(actor), Some(agent)) = (cli.actor.as_deref(), legacy_agent)
+        && actor != agent
+    {
+        return Err(LprmError::invalid_argument(
+            "--actor and worktree create --agent must identify the same caller",
+        ));
+    }
+
+    let value = if let Some(value) = cli.actor.as_deref().or(legacy_agent) {
+        value.to_owned()
+    } else if let Some(value) = std::env::var_os("LPRM_ACTOR") {
+        value
+            .into_string()
+            .map_err(|_| LprmError::invalid_argument("LPRM_ACTOR must contain valid UTF-8 text"))?
+    } else {
+        "local-operator".to_owned()
+    };
+    AgentIdentity::parse(&value)
+}
+
+fn require_worktree_owner(
+    worktree: &lprm_store::WorktreeRecord,
+    actor: &AgentIdentity,
+) -> Result<(), LprmError> {
+    let owner = worktree.owner_agent.as_deref().unwrap_or("local-operator");
+    if owner != actor.as_str() {
+        return Err(LprmError::validation_failed(format!(
+            "Worktree is owned by {owner:?}; caller is {caller:?}",
+            caller = actor.as_str()
+        )));
+    }
+    Ok(())
+}
+
+fn mark_pull_request_ready(
+    pull_request_id: &str,
+    actor: &AgentIdentity,
+) -> Result<Value, LprmError> {
     let (mut store, layout) = open_current_store()?;
     let current = store
         .pull_request(layout.repository_id(), pull_request_id)?
@@ -363,7 +412,7 @@ fn mark_pull_request_ready(pull_request_id: &str) -> Result<Value, LprmError> {
         lprm_core::PullRequestStatus::Ready,
         &lprm_store::TransitionEvidence {
             audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
-            actor: "local-operator".to_owned(),
+            actor: actor.as_str().to_owned(),
             reason: "marked ready for validation".to_owned(),
             revision_id: revision.id.clone(),
             source_sha: revision.source_sha.clone(),
@@ -375,7 +424,7 @@ fn mark_pull_request_ready(pull_request_id: &str) -> Result<Value, LprmError> {
         .map_err(|_| LprmError::internal("Pull request serialization failed"))
 }
 
-fn check_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
+fn check_pull_request(pull_request_id: &str, actor: &AgentIdentity) -> Result<Value, LprmError> {
     let current_directory = std::env::current_dir()
         .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
     let git = lprm_git::Git::default();
@@ -423,7 +472,7 @@ fn check_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
         layout.repository_id(),
         pull_request_id,
         lprm_core::PullRequestStatus::Checking,
-        &transition_evidence(revision, "required checks started"),
+        &transition_evidence(revision, actor, "required checks started"),
     )?;
     if git.merge_preflight(&repository.worktree_root, &target_sha, &source_sha)?
         == lprm_git::MergePreflight::Conflict
@@ -432,7 +481,7 @@ fn check_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
             layout.repository_id(),
             pull_request_id,
             lprm_core::PullRequestStatus::Conflict,
-            &transition_evidence(revision, "merge conflict detected"),
+            &transition_evidence(revision, actor, "merge conflict detected"),
         )?;
         return Err(LprmError::conflict(
             "Pull request conflicts with the target branch",
@@ -450,7 +499,7 @@ fn check_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
         pull_request_id,
         &lprm_store::RecordCheckSuite {
             audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
-            actor: "local-operator".to_owned(),
+            actor: actor.as_str().to_owned(),
             reason: "required checks completed".to_owned(),
             revision_id: revision.id.clone(),
             source_sha,
@@ -504,7 +553,7 @@ fn check_run_evidence(
         .collect()
 }
 
-fn enqueue_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
+fn enqueue_pull_request(pull_request_id: &str, actor: &AgentIdentity) -> Result<Value, LprmError> {
     let current_directory = std::env::current_dir()
         .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
     let git = lprm_git::Git::default();
@@ -540,7 +589,7 @@ fn enqueue_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
         &lprm_store::EnqueuePullRequest {
             queue_id: format!("queue_{}", uuid::Uuid::now_v7().simple()),
             audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
-            actor: "local-operator".to_owned(),
+            actor: actor.as_str().to_owned(),
             reason: "current P0 validation gates passed".to_owned(),
             priority: 0,
             current_fingerprint: fingerprint,
@@ -558,11 +607,12 @@ fn enqueue_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
 
 fn transition_evidence(
     revision: &lprm_store::PullRequestRevisionRecord,
+    actor: &AgentIdentity,
     reason: &str,
 ) -> lprm_store::TransitionEvidence {
     lprm_store::TransitionEvidence {
         audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
-        actor: "local-operator".to_owned(),
+        actor: actor.as_str().to_owned(),
         reason: reason.to_owned(),
         revision_id: revision.id.clone(),
         source_sha: revision.source_sha.clone(),
@@ -577,7 +627,7 @@ fn list_merge_queue() -> Result<Value, LprmError> {
     serde_json::to_value(queue).map_err(|_| LprmError::internal("Merge queue serialization failed"))
 }
 
-fn run_merge_queue(arguments: &QueueRunArgs) -> Result<Value, LprmError> {
+fn run_merge_queue(arguments: &QueueRunArgs, actor: &AgentIdentity) -> Result<Value, LprmError> {
     let current_directory = std::env::current_dir()
         .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
     let repository = lprm_git::Git::default().discover(&current_directory)?;
@@ -592,7 +642,7 @@ fn run_merge_queue(arguments: &QueueRunArgs) -> Result<Value, LprmError> {
             checks: &config.checks,
             lock_timeout: Duration::from_secs(5),
             max_output_bytes: 1024 * 1024,
-            actor: "lprm-queue",
+            actor: actor.as_str(),
         })?;
         let Some(attempt) = result else {
             break;
@@ -610,7 +660,10 @@ fn run_merge_queue(arguments: &QueueRunArgs) -> Result<Value, LprmError> {
     .map_err(|_| LprmError::internal("Merge queue run serialization failed"))
 }
 
-fn create_pull_request(arguments: &PrCreateArgs) -> Result<Value, LprmError> {
+fn create_pull_request(
+    arguments: &PrCreateArgs,
+    actor: &AgentIdentity,
+) -> Result<Value, LprmError> {
     if arguments.title.trim().is_empty() {
         return Err(LprmError::invalid_argument(
             "Pull request title must not be empty",
@@ -636,6 +689,7 @@ fn create_pull_request(arguments: &PrCreateArgs) -> Result<Value, LprmError> {
                 "Pull request source must be an active LPRM-managed worktree",
             )
         })?;
+    require_worktree_owner(&source_worktree, actor)?;
     let observation = git.observe_worktree(&source_worktree.absolute_path)?;
     if !observation.present
         || observation.actual_branch.as_deref() != Some(arguments.source_branch.as_str())
@@ -687,9 +741,7 @@ fn create_pull_request(arguments: &PrCreateArgs) -> Result<Value, LprmError> {
         policy_hash,
         check_config_hash,
         audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
-        actor: source_worktree
-            .owner_agent
-            .unwrap_or_else(|| "local-operator".to_owned()),
+        actor: actor.as_str().to_owned(),
     };
     let record = store.create_pull_request(&request)?;
     serde_json::to_value(record)
@@ -749,7 +801,7 @@ fn diff_pull_request(arguments: &PrDiffArgs) -> Result<Value, LprmError> {
     Ok(value)
 }
 
-fn close_pull_request(arguments: &ReasonArgs) -> Result<Value, LprmError> {
+fn close_pull_request(arguments: &ReasonArgs, actor: &AgentIdentity) -> Result<Value, LprmError> {
     let (mut store, layout) = open_current_store()?;
     let current = store
         .pull_request(layout.repository_id(), &arguments.id)?
@@ -760,17 +812,9 @@ fn close_pull_request(arguments: &ReasonArgs) -> Result<Value, LprmError> {
         .revisions
         .last()
         .ok_or_else(|| LprmError::internal("Pull request has no revision history"))?;
-    let actor = if let Some(worktree_id) = current.worktree_id.as_deref() {
-        store
-            .worktree(layout.repository_id(), worktree_id)?
-            .and_then(|worktree| worktree.owner_agent)
-            .unwrap_or_else(|| "local-operator".to_owned())
-    } else {
-        "local-operator".to_owned()
-    };
     let evidence = lprm_store::TransitionEvidence {
         audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
-        actor,
+        actor: actor.as_str().to_owned(),
         reason: arguments
             .reason
             .clone()
@@ -809,7 +853,7 @@ fn parse_pull_request_status(value: &str) -> Result<lprm_core::PullRequestStatus
         })
 }
 
-fn recover_repository(arguments: &RecoverArgs) -> Result<Value, LprmError> {
+fn recover_repository(arguments: &RecoverArgs, actor: &AgentIdentity) -> Result<Value, LprmError> {
     let current_directory = std::env::current_dir()
         .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
     let repository = lprm_git::Git::default().discover(&current_directory)?;
@@ -868,7 +912,7 @@ fn recover_repository(arguments: &RecoverArgs) -> Result<Value, LprmError> {
         layout: &layout,
         dry_run: arguments.dry_run,
         lock_timeout: Duration::from_secs(5),
-        actor: "lprm-recover",
+        actor: actor.as_str(),
     })?;
 
     serde_json::to_value(RecoveryReport {
@@ -879,7 +923,11 @@ fn recover_repository(arguments: &RecoverArgs) -> Result<Value, LprmError> {
     .map_err(|_| LprmError::internal("Recovery report serialization failed"))
 }
 
-fn cleanup_worktree(arguments: &WorktreeCleanupArgs, confirmed: bool) -> Result<Value, LprmError> {
+fn cleanup_worktree(
+    arguments: &WorktreeCleanupArgs,
+    confirmed: bool,
+    actor: &AgentIdentity,
+) -> Result<Value, LprmError> {
     let current_directory = std::env::current_dir()
         .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
     let repository = lprm_git::Git::default().discover(&current_directory)?;
@@ -890,6 +938,7 @@ fn cleanup_worktree(arguments: &WorktreeCleanupArgs, confirmed: bool) -> Result<
         .ok_or_else(|| {
             LprmError::invalid_argument(format!("Unknown worktree ID {:?}", arguments.id))
         })?;
+    require_worktree_owner(&record, actor)?;
 
     let configured_root = if config.repository.worktree_root.is_absolute() {
         config.repository.worktree_root
@@ -1000,7 +1049,10 @@ fn observe_worktree(
     })
 }
 
-fn create_worktree(arguments: &WorktreeCreateArgs) -> Result<Value, LprmError> {
+fn create_worktree(
+    arguments: &WorktreeCreateArgs,
+    actor: &AgentIdentity,
+) -> Result<Value, LprmError> {
     let current_directory = std::env::current_dir()
         .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
     let repository = lprm_git::Git::default().discover(&current_directory)?;
@@ -1046,7 +1098,7 @@ fn create_worktree(arguments: &WorktreeCreateArgs) -> Result<Value, LprmError> {
         layout.repository_id(),
         spec.branch(),
         &worktree_path,
-        arguments.agent.as_deref(),
+        Some(actor.as_str()),
     )?;
 
     serde_json::to_value(WorktreeCreateReport {
@@ -1054,7 +1106,7 @@ fn create_worktree(arguments: &WorktreeCreateArgs) -> Result<Value, LprmError> {
         branch: spec.branch().to_owned(),
         path: worktree_path,
         target_sha,
-        owner_agent: arguments.agent.clone(),
+        owner_agent: Some(actor.as_str().to_owned()),
     })
     .map_err(|_| LprmError::internal("Worktree report serialization failed"))
 }
