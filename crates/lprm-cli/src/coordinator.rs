@@ -3,11 +3,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use lprm_core::{ChecksConfig, LprmError};
-use lprm_git::{Git, GuardedMerge};
+use lprm_git::{Git, GuardedMerge, MergeRecovery};
 use lprm_runner::{CheckRunner, CheckSuiteResult};
 use lprm_store::{
     CandidateMergeEvidence, CompleteMergeAttempt, MergeAttemptRecord, RepositoryLock,
-    StartMergeAttempt, StateLayout, Store,
+    RequeueMergeAttempt, StartMergeAttempt, StateLayout, Store,
 };
 use serde::Serialize;
 
@@ -24,6 +24,154 @@ pub struct CoordinatorOptions<'a> {
 pub struct CoordinatorReport {
     pub attempt: MergeAttemptRecord,
     pub checks: CheckSuiteResult,
+}
+
+pub struct MergeRecoveryOptions<'a> {
+    pub repository: &'a Path,
+    pub layout: &'a StateLayout,
+    pub dry_run: bool,
+    pub lock_timeout: Duration,
+    pub actor: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MergeRecoveryReport {
+    pub attempt_id: String,
+    pub pr_id: String,
+    pub classification: &'static str,
+    pub action: &'static str,
+    pub observed_target_sha: String,
+}
+
+/// Reconciles active database attempts with exact Git ancestry evidence.
+///
+/// The operation never mutates Git. In dry-run mode it also leaves SQLite unchanged.
+///
+/// # Errors
+///
+/// Returns a stable lock, Git, validation, or persistence error when recovery cannot safely
+/// classify and persist the observed state.
+pub fn recover_merges(
+    options: &MergeRecoveryOptions<'_>,
+) -> Result<Vec<MergeRecoveryReport>, LprmError> {
+    options.layout.prepare()?;
+    let _lock = RepositoryLock::acquire(
+        options.layout.lock_path(),
+        options.lock_timeout,
+        "recover-merges",
+    )?;
+    let mut store = Store::open(options.layout.database_path())?;
+    let target_branch = store
+        .repository_target(options.layout.repository_id())?
+        .ok_or_else(|| LprmError::git_precondition("Repository initialization is missing"))?;
+    let attempts = store
+        .list_merge_attempts(options.layout.repository_id())?
+        .into_iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.state.as_str(),
+                "preparing" | "testing" | "integrating" | "reconciling"
+            )
+        })
+        .collect::<Vec<_>>();
+    let git = Git::default();
+    let mut reports = Vec::with_capacity(attempts.len());
+    for attempt in attempts {
+        let recovery = git.classify_merge_recovery(
+            options.repository,
+            &target_branch,
+            &attempt.target_before_sha,
+            &attempt.source_sha,
+            attempt.candidate_commit_sha.as_deref(),
+        )?;
+        reports.push(reconcile_attempt(options, &mut store, &attempt, recovery)?);
+    }
+    Ok(reports)
+}
+
+fn reconcile_attempt(
+    options: &MergeRecoveryOptions<'_>,
+    store: &mut Store,
+    attempt: &MergeAttemptRecord,
+    recovery: MergeRecovery,
+) -> Result<MergeRecoveryReport, LprmError> {
+    match recovery {
+        MergeRecovery::NotIntegrated { target_sha } => {
+            if !options.dry_run {
+                store.requeue_interrupted_merge(
+                    options.layout.repository_id(),
+                    &RequeueMergeAttempt {
+                        attempt_id: attempt.id.clone(),
+                        audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+                        actor: options.actor.to_owned(),
+                        target_before_sha: attempt.target_before_sha.clone(),
+                        source_sha: attempt.source_sha.clone(),
+                    },
+                )?;
+            }
+            Ok(MergeRecoveryReport {
+                attempt_id: attempt.id.clone(),
+                pr_id: attempt.pr_id.clone(),
+                classification: "not_integrated",
+                action: if options.dry_run {
+                    "would_requeue"
+                } else {
+                    "requeued"
+                },
+                observed_target_sha: target_sha,
+            })
+        }
+        MergeRecovery::Verified(merged) => {
+            let candidate_commit_sha = attempt.candidate_commit_sha.clone().ok_or_else(|| {
+                LprmError::internal("Verified recovery is missing candidate evidence")
+            })?;
+            if !options.dry_run {
+                store.complete_merge_attempt(
+                    options.layout.repository_id(),
+                    &CompleteMergeAttempt {
+                        attempt_id: attempt.id.clone(),
+                        audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+                        actor: options.actor.to_owned(),
+                        target_before_sha: attempt.target_before_sha.clone(),
+                        source_sha: attempt.source_sha.clone(),
+                        candidate_commit_sha,
+                        target_after_sha: merged.target_after_sha.clone(),
+                    },
+                )?;
+            }
+            Ok(MergeRecoveryReport {
+                attempt_id: attempt.id.clone(),
+                pr_id: attempt.pr_id.clone(),
+                classification: "verified",
+                action: if options.dry_run {
+                    "would_complete"
+                } else {
+                    "completed"
+                },
+                observed_target_sha: merged.target_after_sha,
+            })
+        }
+        MergeRecovery::NeedsOperatorReview { target_sha } => {
+            if !options.dry_run {
+                store.mark_merge_attempt_reconciling(
+                    options.layout.repository_id(),
+                    &attempt.id,
+                    "NEEDS_OPERATOR_REVIEW",
+                )?;
+            }
+            Ok(MergeRecoveryReport {
+                attempt_id: attempt.id.clone(),
+                pr_id: attempt.pr_id.clone(),
+                classification: "needs_operator_review",
+                action: if options.dry_run {
+                    "would_mark_for_operator_review"
+                } else {
+                    "marked_for_operator_review"
+                },
+                observed_target_sha: target_sha,
+            })
+        }
+    }
 }
 
 /// Runs at most one queued merge while retaining the repository lock through reconciliation.

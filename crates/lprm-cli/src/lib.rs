@@ -2,6 +2,7 @@ pub mod coordinator;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use lprm_core::{Envelope, LprmError};
@@ -252,6 +253,7 @@ struct WorktreeOrphanReport {
 struct RecoveryReport {
     dry_run: bool,
     worktree_orphans: Vec<WorktreeOrphanReport>,
+    merge_attempts: Vec<coordinator::MergeRecoveryReport>,
 }
 
 pub fn run() -> i32 {
@@ -332,7 +334,7 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             _ => Err(LprmError::internal("PR operation is not implemented yet")),
         },
         Command::Audit(arguments) => show_audit_events(&arguments.id),
-        Command::Recover(_) => recover_worktree_orphans(),
+        Command::Recover(arguments) => recover_repository(arguments),
         Command::Queue(_) => Err(LprmError::internal(format!(
             "{} is not implemented yet",
             cli.command_name()
@@ -539,7 +541,7 @@ fn parse_pull_request_status(value: &str) -> Result<lprm_core::PullRequestStatus
         })
 }
 
-fn recover_worktree_orphans() -> Result<Value, LprmError> {
+fn recover_repository(arguments: &RecoverArgs) -> Result<Value, LprmError> {
     let current_directory = std::env::current_dir()
         .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
     let repository = lprm_git::Git::default().discover(&current_directory)?;
@@ -593,10 +595,18 @@ fn recover_worktree_orphans() -> Result<Value, LprmError> {
         }
     }
     orphans.sort_by(|left, right| left.path.cmp(&right.path));
+    let merge_attempts = coordinator::recover_merges(&coordinator::MergeRecoveryOptions {
+        repository: &repository.worktree_root,
+        layout: &layout,
+        dry_run: arguments.dry_run,
+        lock_timeout: Duration::from_secs(5),
+        actor: "lprm-recover",
+    })?;
 
     serde_json::to_value(RecoveryReport {
-        dry_run: true,
+        dry_run: arguments.dry_run,
         worktree_orphans: orphans,
+        merge_attempts,
     })
     .map_err(|_| LprmError::internal("Recovery report serialization failed"))
 }

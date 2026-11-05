@@ -213,10 +213,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T20: Reconcile interrupted operations
 
 **Acceptance criteria:**
-- [ ] `recover` compares DB evidence with Git ancestry and classifies uncertain work for operator review without destructive rollback.
+- [x] `recover` compares DB evidence with Git ancestry and classifies uncertain work for operator review without destructive rollback.
 
 **Verification:**
-- [ ] Failure injection before merge, during candidate work, and after Git success is idempotently recoverable.
+- [x] Failure injection before merge, during candidate work, and after Git success is idempotently recoverable.
 
 **Dependencies:** T17, T19
 

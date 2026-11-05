@@ -439,6 +439,11 @@ fn recover_reports_database_only_and_git_only_worktrees_without_mutation() {
         .as_array()
         .expect("orphans should be an array");
     assert!(
+        recovered_document["data"]["merge_attempts"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+    assert!(
         orphans
             .iter()
             .any(|orphan| orphan["kind"] == "database_only")
