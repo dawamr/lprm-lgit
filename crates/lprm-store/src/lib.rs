@@ -5,8 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lprm_core::{LprmError, PullRequestStatus};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use lprm_core::{AdmissionGates, LprmError, PullRequestStatus, RevisionFingerprint};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -194,6 +194,17 @@ pub struct TransitionEvidence {
     pub policy_hash: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnqueuePullRequest {
+    pub queue_id: String,
+    pub audit_id: String,
+    pub actor: String,
+    pub reason: String,
+    pub priority: i64,
+    pub current_fingerprint: RevisionFingerprint,
+    pub gates: AdmissionGates,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PullRequestRevisionRecord {
     pub id: String,
@@ -229,6 +240,27 @@ pub struct AuditEventRecord {
     pub actor: String,
     pub payload: Value,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MergeQueueRecord {
+    pub id: String,
+    pub pr_id: String,
+    pub revision_id: String,
+    pub priority: i64,
+    pub status: String,
+    pub enqueued_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+struct QueueAdmissionRow {
+    status: String,
+    revision_id: String,
+    source_sha: String,
+    target_sha: String,
+    policy_hash: String,
+    check_config_hash: String,
 }
 
 impl StateLayout {
@@ -871,6 +903,162 @@ impl Store {
         .collect()
     }
 
+    /// Admits an approved PR to the durable queue when all current evidence gates pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for unmet gates or an ineligible state, a stale-revision error
+    /// for changed evidence, or an internal error when the atomic queue transaction fails.
+    pub fn enqueue_pull_request(
+        &mut self,
+        repository_id: &str,
+        pull_request_id: &str,
+        request: &EnqueuePullRequest,
+    ) -> Result<MergeQueueRecord, LprmError> {
+        if !request.gates.all_satisfied() {
+            return Err(LprmError::validation_failed(
+                "Pull request does not satisfy every queue admission gate",
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| persistence_error("start queue admission transaction", error))?;
+        let row = queue_admission_row(&transaction, repository_id, pull_request_id)?;
+        let QueueAdmissionRow {
+            status,
+            revision_id,
+            source_sha,
+            target_sha,
+            policy_hash,
+            check_config_hash,
+        } = row;
+        let status = parse_pull_request_status(&status)?;
+        status.transition_to(PullRequestStatus::Queued)?;
+        let recorded = RevisionFingerprint {
+            source_sha: source_sha.clone(),
+            target_sha: target_sha.clone(),
+            policy_hash: policy_hash.clone(),
+            check_config_hash: check_config_hash.clone(),
+        };
+        if !recorded
+            .assess(&request.current_fingerprint, status)
+            .queue_evidence_current
+        {
+            return Err(LprmError::stale_revision(
+                "Pull request evidence changed before queue admission",
+            ));
+        }
+        ensure_no_active_queue_entry(&transaction, pull_request_id)?;
+        transaction
+            .execute(
+                "INSERT INTO merge_queue(\
+                    id, pr_id, revision_id, priority, status, enqueued_at\
+                 ) VALUES (\
+                    ?1, ?2, ?3, ?4, 'queued', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+                 )",
+                (
+                    &request.queue_id,
+                    pull_request_id,
+                    &revision_id,
+                    request.priority,
+                ),
+            )
+            .map_err(|error| persistence_error("enqueue pull request", error))?;
+        let changed = transaction
+            .execute(
+                "UPDATE pull_requests \
+                 SET status = 'queued', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE repository_id = ?1 AND id = ?2 AND status = 'approved'",
+                (repository_id, pull_request_id),
+            )
+            .map_err(|error| persistence_error("mark pull request queued", error))?;
+        if changed != 1 {
+            return Err(LprmError::internal(
+                "Pull request changed during queue admission",
+            ));
+        }
+        let payload = json!({
+            "reason": request.reason,
+            "from": "approved",
+            "to": "queued",
+            "revision_id": revision_id,
+            "source_sha": source_sha,
+            "target_sha": target_sha,
+            "policy_hash": policy_hash,
+            "check_config_hash": check_config_hash,
+        });
+        transaction
+            .execute(
+                "INSERT INTO audit_events(\
+                    id, repository_id, pr_id, event_type, actor, payload_json, created_at\
+                 ) VALUES (\
+                    ?1, ?2, ?3, 'pr_status_transition', ?4, ?5, \
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+                 )",
+                (
+                    &request.audit_id,
+                    repository_id,
+                    pull_request_id,
+                    &request.actor,
+                    payload.to_string(),
+                ),
+            )
+            .map_err(|error| persistence_error("record queue admission audit", error))?;
+        transaction
+            .commit()
+            .map_err(|error| persistence_error("commit queue admission", error))?;
+
+        self.merge_queue_record(repository_id, &request.queue_id)?
+            .ok_or_else(|| LprmError::internal("Queued pull request could not be read"))
+    }
+
+    /// Lists durable queue entries for a repository in admission order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when SQLite cannot query or decode queue records.
+    pub fn list_merge_queue(
+        &self,
+        repository_id: &str,
+    ) -> Result<Vec<MergeQueueRecord>, LprmError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT q.id, q.pr_id, q.revision_id, q.priority, q.status, q.enqueued_at, \
+                        q.started_at, q.finished_at \
+                 FROM merge_queue q \
+                 JOIN pull_requests p ON p.id = q.pr_id \
+                 WHERE p.repository_id = ?1 \
+                 ORDER BY q.enqueued_at, q.id",
+            )
+            .map_err(|error| persistence_error("prepare merge queue query", error))?;
+        let rows = statement
+            .query_map([repository_id], decode_merge_queue_record)
+            .map_err(|error| persistence_error("query merge queue", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| persistence_error("decode merge queue", error))
+    }
+
+    fn merge_queue_record(
+        &self,
+        repository_id: &str,
+        queue_id: &str,
+    ) -> Result<Option<MergeQueueRecord>, LprmError> {
+        self.connection
+            .query_row(
+                "SELECT q.id, q.pr_id, q.revision_id, q.priority, q.status, q.enqueued_at, \
+                        q.started_at, q.finished_at \
+                 FROM merge_queue q \
+                 JOIN pull_requests p ON p.id = q.pr_id \
+                 WHERE p.repository_id = ?1 AND q.id = ?2",
+                (repository_id, queue_id),
+                decode_merge_queue_record,
+            )
+            .optional()
+            .map_err(|error| persistence_error("read merge queue entry", error))
+    }
+
     fn pull_request_revisions(
         &self,
         pull_request_id: &str,
@@ -954,6 +1142,72 @@ fn parse_pull_request_status(value: &str) -> Result<PullRequestStatus, LprmError
         .into_iter()
         .find(|status| status.as_str() == value)
         .ok_or_else(|| LprmError::internal(format!("Unknown persisted PR status {value:?}")))
+}
+
+fn decode_merge_queue_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MergeQueueRecord> {
+    Ok(MergeQueueRecord {
+        id: row.get(0)?,
+        pr_id: row.get(1)?,
+        revision_id: row.get(2)?,
+        priority: row.get(3)?,
+        status: row.get(4)?,
+        enqueued_at: row.get(5)?,
+        started_at: row.get(6)?,
+        finished_at: row.get(7)?,
+    })
+}
+
+fn queue_admission_row(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    pull_request_id: &str,
+) -> Result<QueueAdmissionRow, LprmError> {
+    transaction
+        .query_row(
+            "SELECT p.status, r.id, r.source_sha, r.target_sha, r.policy_hash, \
+                    r.check_config_hash \
+             FROM pull_requests p \
+             JOIN pr_revisions r ON r.pr_id = p.id \
+             WHERE p.repository_id = ?1 AND p.id = ?2 \
+             ORDER BY r.revision_number DESC LIMIT 1",
+            (repository_id, pull_request_id),
+            |row| {
+                Ok(QueueAdmissionRow {
+                    status: row.get(0)?,
+                    revision_id: row.get(1)?,
+                    source_sha: row.get(2)?,
+                    target_sha: row.get(3)?,
+                    policy_hash: row.get(4)?,
+                    check_config_hash: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| persistence_error("read queue admission evidence", error))?
+        .ok_or_else(|| LprmError::invalid_argument("Unknown pull request ID"))
+}
+
+fn ensure_no_active_queue_entry(
+    transaction: &Transaction<'_>,
+    pull_request_id: &str,
+) -> Result<(), LprmError> {
+    let already_active = transaction
+        .query_row(
+            "SELECT EXISTS(\
+                SELECT 1 FROM merge_queue \
+                WHERE pr_id = ?1 AND status IN ('queued', 'started')\
+             )",
+            [pull_request_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| persistence_error("check active queue entry", error))?;
+    if already_active {
+        Err(LprmError::validation_failed(
+            "Pull request already has an active queue entry",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn default_state_root() -> Result<PathBuf, LprmError> {

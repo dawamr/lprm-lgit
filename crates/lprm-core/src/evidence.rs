@@ -31,6 +31,24 @@ pub struct EvidenceFreshness {
     pub status: PullRequestStatus,
 }
 
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AdmissionGates {
+    pub conflict_free: bool,
+    pub required_checks_passed: bool,
+    pub required_reviews_passed: bool,
+    pub required_approvals_present: bool,
+}
+
+impl AdmissionGates {
+    pub const fn all_satisfied(self) -> bool {
+        self.conflict_free
+            && self.required_checks_passed
+            && self.required_reviews_passed
+            && self.required_approvals_present
+    }
+}
+
 impl RevisionFingerprint {
     /// Compares current repository evidence to the immutable tuple on a PR revision.
     pub fn assess(&self, current: &Self, status: PullRequestStatus) -> EvidenceFreshness {

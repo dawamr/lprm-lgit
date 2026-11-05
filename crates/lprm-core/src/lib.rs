@@ -12,7 +12,7 @@ pub use config::{
     ReviewMode, RiskLevel,
 };
 pub use error::{ErrorCode, LprmError};
-pub use evidence::{EvidenceFreshness, FingerprintInput, RevisionFingerprint};
+pub use evidence::{AdmissionGates, EvidenceFreshness, FingerprintInput, RevisionFingerprint};
 pub use output::{ApiError, Envelope, SCHEMA_VERSION};
 pub use pr::PullRequestStatus;
 pub use worktree::{WorktreeSpec, validate_managed_worktree_path};
