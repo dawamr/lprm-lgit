@@ -202,6 +202,76 @@ pub struct TransitionEvidence {
     pub policy_hash: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckRunStatus {
+    Passed,
+    Failed,
+    TimedOut,
+    MissingExecutable,
+}
+
+impl CheckRunStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::MissingExecutable => "missing_executable",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, LprmError> {
+        match value {
+            "passed" => Ok(Self::Passed),
+            "failed" => Ok(Self::Failed),
+            "timed_out" => Ok(Self::TimedOut),
+            "missing_executable" => Ok(Self::MissingExecutable),
+            _ => Err(LprmError::internal(format!(
+                "Unknown persisted check status {value:?}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckRunEvidence {
+    pub id: String,
+    pub name: String,
+    pub status: CheckRunStatus,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub stdout_path: PathBuf,
+    pub stderr_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordCheckSuite {
+    pub audit_id: String,
+    pub actor: String,
+    pub reason: String,
+    pub revision_id: String,
+    pub source_sha: String,
+    pub target_sha: String,
+    pub policy_hash: String,
+    pub check_config_hash: String,
+    pub checks: Vec<CheckRunEvidence>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CheckRunRecord {
+    pub id: String,
+    pub revision_id: String,
+    pub name: String,
+    pub status: CheckRunStatus,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub stdout_path: PathBuf,
+    pub stderr_path: PathBuf,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnqueuePullRequest {
     pub queue_id: String,
@@ -986,6 +1056,152 @@ impl Store {
             .ok_or_else(|| LprmError::internal("Transitioned pull request could not be read"))
     }
 
+    /// Persists a required-check suite and its resulting PR transition atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale-revision error when the immutable evidence tuple differs, a validation
+    /// error unless the PR is checking, or an internal error when persistence fails.
+    pub fn record_check_suite(
+        &mut self,
+        repository_id: &str,
+        pull_request_id: &str,
+        request: &RecordCheckSuite,
+    ) -> Result<PullRequestRecord, LprmError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| persistence_error("start check suite transaction", error))?;
+        let evidence = transaction
+            .query_row(
+                "SELECT p.status, r.id, r.source_sha, r.target_sha, r.policy_hash, \
+                        r.check_config_hash \
+                 FROM pull_requests p \
+                 JOIN pr_revisions r ON r.pr_id = p.id \
+                 WHERE p.repository_id = ?1 AND p.id = ?2 \
+                 ORDER BY r.revision_number DESC LIMIT 1",
+                (repository_id, pull_request_id),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| persistence_error("read check suite evidence", error))?
+            .ok_or_else(|| LprmError::invalid_argument("Unknown pull request ID"))?;
+        if evidence.0 != PullRequestStatus::Checking.as_str() {
+            return Err(LprmError::validation_failed(
+                "Pull request is not awaiting check results",
+            ));
+        }
+        if evidence.1 != request.revision_id
+            || evidence.2 != request.source_sha
+            || evidence.3 != request.target_sha
+            || evidence.4 != request.policy_hash
+            || evidence.5 != request.check_config_hash
+        {
+            return Err(LprmError::stale_revision("Check suite evidence is stale"));
+        }
+        insert_check_runs(&transaction, request)?;
+        let next = if request
+            .checks
+            .iter()
+            .all(|check| check.status == CheckRunStatus::Passed)
+        {
+            PullRequestStatus::Approved
+        } else {
+            PullRequestStatus::Failed
+        };
+        PullRequestStatus::Checking.transition_to(next)?;
+        let changed = transaction
+            .execute(
+                "UPDATE pull_requests \
+                 SET status = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE repository_id = ?2 AND id = ?3 AND status = 'checking'",
+                (next.as_str(), repository_id, pull_request_id),
+            )
+            .map_err(|error| persistence_error("finish pull request checks", error))?;
+        if changed != 1 {
+            return Err(LprmError::internal(
+                "Pull request changed while recording checks",
+            ));
+        }
+        record_check_suite_audit(&transaction, repository_id, pull_request_id, next, request)?;
+        transaction
+            .commit()
+            .map_err(|error| persistence_error("commit check suite", error))?;
+        self.pull_request(repository_id, pull_request_id)?
+            .ok_or_else(|| LprmError::internal("Checked pull request could not be read"))
+    }
+
+    /// Lists persisted check evidence for one immutable PR revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when SQLite cannot query or decode check records.
+    pub fn list_check_runs(&self, revision_id: &str) -> Result<Vec<CheckRunRecord>, LprmError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, revision_id, name, status, exit_code, duration_ms, stdout_path, \
+                        stderr_path, started_at, finished_at \
+                 FROM check_runs WHERE revision_id = ?1 ORDER BY started_at, id",
+            )
+            .map_err(|error| persistence_error("prepare check run query", error))?;
+        let rows = statement
+            .query_map([revision_id], |row| {
+                let status = row.get::<_, String>(3)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    status,
+                    row.get::<_, Option<i32>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                ))
+            })
+            .map_err(|error| persistence_error("query check runs", error))?;
+        rows.map(|row| {
+            let (
+                id,
+                revision_id,
+                name,
+                status,
+                exit_code,
+                duration_ms,
+                stdout_path,
+                stderr_path,
+                started_at,
+                finished_at,
+            ) = row.map_err(|error| persistence_error("decode check run", error))?;
+            let duration_ms = u64::try_from(duration_ms)
+                .map_err(|_| LprmError::internal("Persisted check duration is invalid"))?;
+            Ok(CheckRunRecord {
+                id,
+                revision_id,
+                name,
+                status: CheckRunStatus::parse(&status)?,
+                exit_code,
+                duration_ms,
+                stdout_path: PathBuf::from(stdout_path),
+                stderr_path: PathBuf::from(stderr_path),
+                started_at,
+                finished_at,
+            })
+        })
+        .collect()
+    }
+
     /// Lists audit events in durable chronological order.
     ///
     /// # Errors
@@ -1490,6 +1706,83 @@ impl Store {
 
         Ok(Self { connection })
     }
+}
+
+fn insert_check_runs(
+    transaction: &Transaction<'_>,
+    request: &RecordCheckSuite,
+) -> Result<(), LprmError> {
+    let mut names = std::collections::BTreeSet::new();
+    for check in &request.checks {
+        if check.name.is_empty() || !names.insert(&check.name) {
+            return Err(LprmError::invalid_argument(
+                "Check suite names must be non-empty and unique",
+            ));
+        }
+        let duration_ms = i64::try_from(check.duration_ms)
+            .map_err(|_| LprmError::invalid_argument("Check duration is too large"))?;
+        transaction
+            .execute(
+                "INSERT INTO check_runs(\
+                    id, revision_id, name, status, exit_code, duration_ms, stdout_path, \
+                    stderr_path, started_at, finished_at\
+                 ) VALUES (\
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+                 )",
+                (
+                    &check.id,
+                    &request.revision_id,
+                    &check.name,
+                    check.status.as_str(),
+                    check.exit_code,
+                    duration_ms,
+                    check.stdout_path.to_string_lossy().as_ref(),
+                    check.stderr_path.to_string_lossy().as_ref(),
+                ),
+            )
+            .map_err(|error| persistence_error("record check run", error))?;
+    }
+    Ok(())
+}
+
+fn record_check_suite_audit(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    pull_request_id: &str,
+    next: PullRequestStatus,
+    request: &RecordCheckSuite,
+) -> Result<(), LprmError> {
+    let payload = json!({
+        "reason": request.reason,
+        "from": "checking",
+        "to": next.as_str(),
+        "revision_id": request.revision_id,
+        "source_sha": request.source_sha,
+        "target_sha": request.target_sha,
+        "policy_hash": request.policy_hash,
+        "check_config_hash": request.check_config_hash,
+        "check_count": request.checks.len(),
+    });
+    transaction
+        .execute(
+            "INSERT INTO audit_events(\
+                id, repository_id, pr_id, event_type, actor, payload_json, created_at\
+             ) VALUES (\
+                ?1, ?2, ?3, 'pr_status_transition', ?4, ?5, \
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+             )",
+            (
+                &request.audit_id,
+                repository_id,
+                pull_request_id,
+                &request.actor,
+                payload.to_string(),
+            ),
+        )
+        .map_err(|error| persistence_error("record check suite audit", error))?;
+    Ok(())
 }
 
 fn migrate_to_one(connection: &mut Connection) -> Result<(), LprmError> {

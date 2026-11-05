@@ -1,7 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lprm_core::{ErrorCode, PullRequestStatus};
-use lprm_store::{NewPullRequest, Store, TransitionEvidence};
+use lprm_store::{
+    CheckRunEvidence, CheckRunStatus, NewPullRequest, RecordCheckSuite, Store, TransitionEvidence,
+};
 
 fn initialized_store() -> Store {
     let store = Store::open_in_memory().expect("memory database should migrate");
@@ -36,6 +38,55 @@ fn new_pull_request() -> NewPullRequest {
         check_config_hash: "checks".to_owned(),
         audit_id: "audit-1".to_owned(),
         actor: "codex".to_owned(),
+    }
+}
+
+fn checking_store() -> Store {
+    let mut store = initialized_store();
+    store.create_pull_request(&new_pull_request()).unwrap();
+    for (index, status) in [PullRequestStatus::Ready, PullRequestStatus::Checking]
+        .into_iter()
+        .enumerate()
+    {
+        store
+            .transition_pull_request(
+                "repo-1",
+                "pr-1",
+                status,
+                &TransitionEvidence {
+                    audit_id: format!("audit-check-transition-{index}"),
+                    actor: "codex".to_owned(),
+                    reason: "run checks".to_owned(),
+                    revision_id: "revision-1".to_owned(),
+                    source_sha: "1111111111111111111111111111111111111111".to_owned(),
+                    target_sha: "0000000000000000000000000000000000000000".to_owned(),
+                    policy_hash: "policy".to_owned(),
+                },
+            )
+            .unwrap();
+    }
+    store
+}
+
+fn check_suite(status: CheckRunStatus) -> RecordCheckSuite {
+    RecordCheckSuite {
+        audit_id: "audit-check-suite".to_owned(),
+        actor: "codex".to_owned(),
+        reason: "required checks completed".to_owned(),
+        revision_id: "revision-1".to_owned(),
+        source_sha: "1111111111111111111111111111111111111111".to_owned(),
+        target_sha: "0000000000000000000000000000000000000000".to_owned(),
+        policy_hash: "policy".to_owned(),
+        check_config_hash: "checks".to_owned(),
+        checks: vec![CheckRunEvidence {
+            id: "check-1".to_owned(),
+            name: "test".to_owned(),
+            status,
+            exit_code: Some(i32::from(status != CheckRunStatus::Passed)),
+            duration_ms: 42,
+            stdout_path: PathBuf::from("/tmp/test.stdout.log"),
+            stderr_path: PathBuf::from("/tmp/test.stderr.log"),
+        }],
     }
 }
 
@@ -180,4 +231,41 @@ fn transition_audit_is_ordered_and_rolls_back_on_stale_evidence() {
     );
     assert_eq!(events[1].payload["policy_hash"], "policy");
     assert_ne!(events[1].created_at, "");
+}
+
+#[test]
+fn passing_check_suite_is_persisted_before_approval() {
+    let mut store = checking_store();
+
+    let pull_request = store
+        .record_check_suite("repo-1", "pr-1", &check_suite(CheckRunStatus::Passed))
+        .expect("passing suite should persist");
+
+    assert_eq!(pull_request.status, PullRequestStatus::Approved);
+    let checks = store.list_check_runs("revision-1").unwrap();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].name, "test");
+    assert_eq!(checks[0].status, CheckRunStatus::Passed);
+    assert!(
+        store
+            .audit_events("repo-1", Some("pr-1"))
+            .unwrap()
+            .iter()
+            .any(|event| event.payload["to"] == "approved")
+    );
+}
+
+#[test]
+fn failing_check_suite_is_persisted_without_approval() {
+    let mut store = checking_store();
+
+    let pull_request = store
+        .record_check_suite("repo-1", "pr-1", &check_suite(CheckRunStatus::Failed))
+        .expect("failing suite should persist");
+
+    assert_eq!(pull_request.status, PullRequestStatus::Failed);
+    assert_eq!(
+        store.list_check_runs("revision-1").unwrap()[0].status,
+        CheckRunStatus::Failed
+    );
 }
