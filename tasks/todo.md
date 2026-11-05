@@ -141,10 +141,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T13: Collect diffs and commits
 
 **Acceptance criteria:**
-- [ ] Exact source/target SHAs, reachable commits, names, stats, and patches are collected without shell evaluation.
+- [x] Exact source/target SHAs, reachable commits, names, stats, and patches are collected without shell evaluation.
 
 **Verification:**
-- [ ] Malicious-filename and unrelated-history tests pass.
+- [x] Malicious-filename and unrelated-history tests pass.
 
 **Dependencies:** T03
 
