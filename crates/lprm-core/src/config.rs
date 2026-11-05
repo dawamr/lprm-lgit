@@ -168,7 +168,26 @@ impl Config {
                 )));
             }
         }
+        self.validate_review()
+    }
 
+    fn validate_review(&self) -> Result<(), LprmError> {
+        let review = &self.review;
+        if review.command.iter().any(String::is_empty) {
+            return Err(LprmError::invalid_argument(
+                "review.command must contain non-empty arguments",
+            ));
+        }
+        if review.mode == ReviewMode::External && review.command.is_empty() {
+            return Err(LprmError::invalid_argument(
+                "review.mode = \"external\" requires review.command",
+            ));
+        }
+        if review.timeout_seconds == 0 || review.max_payload_bytes == 0 {
+            return Err(LprmError::invalid_argument(
+                "review.timeout_seconds and review.max_payload_bytes must be greater than zero",
+            ));
+        }
         Ok(())
     }
 }
@@ -298,6 +317,13 @@ pub struct ReviewConfig {
     pub mode: ReviewMode,
     #[serde(default = "default_approval_risks")]
     pub require_approval_for_risk: Vec<RiskLevel>,
+    /// Argument-array command for the external reviewer adapter (`mode = "external"`).
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default = "default_review_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_review_payload_bytes")]
+    pub max_payload_bytes: usize,
 }
 
 impl Default for ReviewConfig {
@@ -305,6 +331,9 @@ impl Default for ReviewConfig {
         Self {
             mode: ReviewMode::Rules,
             require_approval_for_risk: default_approval_risks(),
+            command: Vec::new(),
+            timeout_seconds: default_review_timeout_seconds(),
+            max_payload_bytes: default_review_payload_bytes(),
         }
     }
 }
@@ -314,12 +343,16 @@ impl Default for ReviewConfig {
 pub struct PolicyConfig {
     #[serde(default = "default_protected_paths")]
     pub protected_paths: Vec<String>,
+    /// PRs whose assessed risk is listed here are queued automatically once every gate is current.
+    #[serde(default)]
+    pub auto_enqueue_risks: Vec<RiskLevel>,
 }
 
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
             protected_paths: default_protected_paths(),
+            auto_enqueue_risks: Vec::new(),
         }
     }
 }
@@ -370,6 +403,14 @@ fn default_check_commands() -> BTreeMap<String, Vec<String>> {
     ])
 }
 
+const fn default_review_timeout_seconds() -> u64 {
+    60
+}
+
+const fn default_review_payload_bytes() -> usize {
+    1024 * 1024
+}
+
 fn default_approval_risks() -> Vec<RiskLevel> {
     vec![RiskLevel::High, RiskLevel::Critical]
 }
@@ -405,6 +446,14 @@ mod tests {
         .expect_err("missing command should fail");
 
         assert!(error.message.contains("missing command"));
+    }
+
+    #[test]
+    fn external_review_requires_a_command() {
+        let error = Config::from_toml("schema_version = 1\n[review]\nmode = \"external\"\n")
+            .expect_err("external mode without a command should fail");
+
+        assert!(error.message.contains("review.command"));
     }
 
     #[test]
