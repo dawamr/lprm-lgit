@@ -97,6 +97,13 @@ pub struct DiffCollection {
     pub patch: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MergePreflight {
+    Clean { tree_sha: String },
+    Conflict,
+}
+
 #[derive(Clone, Debug)]
 pub struct Git {
     executable: PathBuf,
@@ -485,6 +492,49 @@ impl Git {
         })
     }
 
+    /// Computes the merge result for exact commits without touching an index or working tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Git precondition error when either commit is invalid, Git cannot perform the
+    /// preflight, or a successful result does not contain a full top-level tree object ID.
+    pub fn merge_preflight(
+        &self,
+        repository: &Path,
+        target_sha: &str,
+        source_sha: &str,
+    ) -> Result<MergePreflight, LprmError> {
+        self.verify_commit(repository, target_sha, "target")?;
+        self.verify_commit(repository, source_sha, "source")?;
+
+        // Modern merge-tree does not read or write the worktree or index. Its documented status
+        // contract is 0=clean, 1=conflict, everything else=error.
+        // Source: https://git-scm.com/docs/git-merge-tree#_exit_status
+        let output = self.run(
+            repository,
+            &["merge-tree", "--write-tree", target_sha, source_sha],
+        )?;
+        match output.status.code() {
+            Some(0) => {
+                let tree_sha = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                if !is_object_id(&tree_sha) {
+                    return Err(LprmError::git_precondition(
+                        "Git returned an invalid preflight tree object ID",
+                    ));
+                }
+                Ok(MergePreflight::Clean { tree_sha })
+            }
+            Some(1) => Ok(MergePreflight::Conflict),
+            _ => Err(LprmError::git_precondition(
+                "Git could not perform merge conflict preflight",
+            )),
+        }
+    }
+
     fn verify_commit(
         &self,
         repository: &Path,
@@ -733,7 +783,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{Git, GitVersion, parse_worktree_porcelain};
+    use super::{Git, GitVersion, MergePreflight, parse_worktree_porcelain};
 
     fn run_git(path: &Path, arguments: &[&str]) {
         let status = Command::new("git")
@@ -743,6 +793,20 @@ mod tests {
             .status()
             .expect("git should start");
         assert!(status.success(), "git command failed: {arguments:?}");
+    }
+
+    fn git_stdout(path: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(arguments)
+            .output()
+            .expect("git should start");
+        assert!(output.status.success(), "git command failed: {arguments:?}");
+        String::from_utf8(output.stdout)
+            .expect("git output should be UTF-8")
+            .trim()
+            .to_owned()
     }
 
     #[test]
@@ -920,5 +984,77 @@ mod tests {
             .expect_err("unrelated histories must be rejected");
 
         assert!(error.message.contains("unrelated"));
+    }
+
+    #[test]
+    fn merge_preflight_reports_clean_without_mutating_checkout_or_index() {
+        let repository = merge_fixture();
+        let target_sha = git_stdout(repository.path(), &["rev-parse", "dev"]);
+        run_git(repository.path(), &["checkout", "--quiet", "-b", "feature"]);
+        fs::write(repository.path().join("feature.txt"), "feature\n")
+            .expect("feature should be written");
+        run_git(repository.path(), &["add", "--", "feature.txt"]);
+        run_git(repository.path(), &["commit", "--quiet", "-m", "feature"]);
+        let source_sha = git_stdout(repository.path(), &["rev-parse", "HEAD"]);
+        let status_before = git_stdout(repository.path(), &["status", "--porcelain=v1"]);
+        let index_before = git_stdout(repository.path(), &["write-tree"]);
+
+        let result = Git::default()
+            .merge_preflight(repository.path(), &target_sha, &source_sha)
+            .expect("preflight should run");
+
+        assert!(matches!(result, MergePreflight::Clean { .. }));
+        assert_eq!(
+            git_stdout(repository.path(), &["status", "--porcelain=v1"]),
+            status_before
+        );
+        assert_eq!(git_stdout(repository.path(), &["write-tree"]), index_before);
+    }
+
+    #[test]
+    fn merge_preflight_reports_conflict_without_mutating_checkout_or_index() {
+        let repository = merge_fixture();
+        run_git(repository.path(), &["checkout", "--quiet", "-b", "feature"]);
+        fs::write(repository.path().join("shared.txt"), "feature\n")
+            .expect("feature should be written");
+        run_git(repository.path(), &["add", "--", "shared.txt"]);
+        run_git(repository.path(), &["commit", "--quiet", "-m", "feature"]);
+        let source_sha = git_stdout(repository.path(), &["rev-parse", "HEAD"]);
+        run_git(repository.path(), &["checkout", "--quiet", "dev"]);
+        fs::write(repository.path().join("shared.txt"), "target\n")
+            .expect("target should be written");
+        run_git(repository.path(), &["add", "--", "shared.txt"]);
+        run_git(repository.path(), &["commit", "--quiet", "-m", "target"]);
+        let target_sha = git_stdout(repository.path(), &["rev-parse", "HEAD"]);
+        let status_before = git_stdout(repository.path(), &["status", "--porcelain=v1"]);
+        let index_before = git_stdout(repository.path(), &["write-tree"]);
+
+        let result = Git::default()
+            .merge_preflight(repository.path(), &target_sha, &source_sha)
+            .expect("preflight should run");
+
+        assert_eq!(result, MergePreflight::Conflict);
+        assert_eq!(
+            git_stdout(repository.path(), &["status", "--porcelain=v1"]),
+            status_before
+        );
+        assert_eq!(git_stdout(repository.path(), &["write-tree"]), index_before);
+    }
+
+    fn merge_fixture() -> tempfile::TempDir {
+        let repository = tempdir().expect("temporary directory should be created");
+        run_git(
+            repository.path(),
+            &["init", "--quiet", "--initial-branch=dev"],
+        );
+        run_git(repository.path(), &["config", "user.name", "LPRM Test"]);
+        run_git(
+            repository.path(),
+            &["config", "user.email", "lprm@example.invalid"],
+        );
+        fs::write(repository.path().join("shared.txt"), "base\n").expect("base should be written");
+        run_git(repository.path(), &["add", "--", "shared.txt"]);
+        run_git(repository.path(), &["commit", "--quiet", "-m", "base"]);
+        repository
     }
 }

@@ -151,10 +151,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T14: Add merge-tree conflict preflight
 
 **Acceptance criteria:**
-- [ ] Exit status distinguishes clean, conflict, and Git errors while leaving all worktree indexes and files unchanged.
+- [x] Exit status distinguishes clean, conflict, and Git errors while leaving all worktree indexes and files unchanged.
 
 **Verification:**
-- [ ] Clean and conflicting temporary-repository tests compare pre/post status and index trees.
+- [x] Clean and conflicting temporary-repository tests compare pre/post status and index trees.
 
 **Dependencies:** T03, T13
 
