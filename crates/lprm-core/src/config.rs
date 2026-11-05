@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::LprmError;
 
@@ -38,6 +39,18 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Returns a deterministic SHA-256 fingerprint of the effective config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if the validated config cannot be serialized.
+    pub fn fingerprint(&self) -> Result<String, LprmError> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(self)
+            .map_err(|_| LprmError::internal("Config fingerprint serialization failed"))?;
+        Ok(hex::encode(Sha256::digest(encoded)))
+    }
+
     /// Parses and validates a schema-versioned TOML document.
     ///
     /// # Errors

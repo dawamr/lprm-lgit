@@ -196,6 +196,15 @@ pub struct RecoverArgs {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct InitReport {
+    repository_id: String,
+    target_branch: String,
+    target_sha: String,
+    state_directory: std::path::PathBuf,
+    database_path: std::path::PathBuf,
+}
+
 pub fn run() -> i32 {
     run_from(std::env::args_os())
 }
@@ -241,6 +250,7 @@ where
 
 fn execute(cli: &Cli) -> Result<Value, LprmError> {
     match &cli.command {
+        Command::Init(arguments) => initialize_repository(arguments),
         Command::Doctor => {
             let current_directory = std::env::current_dir()
                 .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
@@ -263,6 +273,42 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             cli.command_name()
         ))),
     }
+}
+
+fn initialize_repository(arguments: &InitArgs) -> Result<Value, LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let doctor = lprm_git::doctor(&current_directory)?;
+    let mut config = lprm_core::Config::load_for_repository(&doctor.repository.worktree_root)?;
+    config
+        .repository
+        .target_branch
+        .clone_from(&arguments.target);
+    config.validate()?;
+
+    let git = lprm_git::Git::default();
+    let target_sha = git.resolve_local_branch(
+        &doctor.repository.worktree_root,
+        &config.repository.target_branch,
+    )?;
+    let layout = lprm_store::StateLayout::for_repository(&doctor.repository.common_git_dir)?;
+    layout.prepare()?;
+    let store = lprm_store::Store::open(layout.database_path())?;
+    store.register_repository(
+        layout.repository_id(),
+        &doctor.repository.common_git_dir,
+        &config.repository.target_branch,
+        &config.fingerprint()?,
+    )?;
+
+    serde_json::to_value(InitReport {
+        repository_id: layout.repository_id().to_owned(),
+        target_branch: config.repository.target_branch,
+        target_sha,
+        state_directory: layout.repository_dir().to_owned(),
+        database_path: layout.database_path().to_owned(),
+    })
+    .map_err(|_| LprmError::internal("Init report serialization failed"))
 }
 
 fn machine_output_requested(args: &[OsString]) -> bool {

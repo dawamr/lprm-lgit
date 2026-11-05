@@ -1,11 +1,13 @@
 //! SQLite persistence adapter for LPRM.
 
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lprm_core::LprmError;
 use rusqlite::{Connection, TransactionBehavior};
+use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: i64 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -143,6 +145,72 @@ pub struct Store {
     connection: Connection,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateLayout {
+    repository_id: String,
+    repository_dir: PathBuf,
+    database_path: PathBuf,
+    logs_dir: PathBuf,
+    lock_path: PathBuf,
+}
+
+impl StateLayout {
+    /// Resolves a repository-scoped layout beneath the configured platform state root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when no usable state or home directory is configured.
+    pub fn for_repository(common_git_dir: &Path) -> Result<Self, LprmError> {
+        let root = default_state_root()?;
+        Ok(Self::under(&root, common_git_dir))
+    }
+
+    pub fn under(root: &Path, common_git_dir: &Path) -> Self {
+        let digest = hex::encode(Sha256::digest(common_git_dir.to_string_lossy().as_bytes()));
+        let repository_id = format!("repo_{digest}");
+        let repository_dir = root.join("repositories").join(&repository_id);
+        Self {
+            database_path: repository_dir.join("lprm.db"),
+            logs_dir: repository_dir.join("logs"),
+            lock_path: repository_dir.join("merge.lock"),
+            repository_id,
+            repository_dir,
+        }
+    }
+
+    /// Creates private repository and log directories without touching the Git worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the directories or permissions cannot be prepared.
+    pub fn prepare(&self) -> Result<(), LprmError> {
+        fs::create_dir_all(&self.logs_dir)
+            .map_err(|error| persistence_error("create repository state directories", error))?;
+        set_private_permissions(&self.repository_dir)?;
+        set_private_permissions(&self.logs_dir)
+    }
+
+    pub fn repository_id(&self) -> &str {
+        &self.repository_id
+    }
+
+    pub fn repository_dir(&self) -> &Path {
+        self.repository_dir.as_path()
+    }
+
+    pub fn database_path(&self) -> &Path {
+        self.database_path.as_path()
+    }
+
+    pub fn logs_dir(&self) -> &Path {
+        self.logs_dir.as_path()
+    }
+
+    pub fn lock_path(&self) -> &Path {
+        self.lock_path.as_path()
+    }
+}
+
 impl Store {
     /// Opens a database file, creates its parent directory, and applies pending migrations.
     ///
@@ -187,6 +255,35 @@ impl Store {
 
     pub const fn connection_mut(&mut self) -> &mut Connection {
         &mut self.connection
+    }
+
+    /// Registers or refreshes the repository record for an initialized state database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when the canonical path is not UTF-8 or SQLite rejects the row.
+    pub fn register_repository(
+        &self,
+        repository_id: &str,
+        common_git_dir: &Path,
+        target_branch: &str,
+        config_hash: &str,
+    ) -> Result<(), LprmError> {
+        let common_git_dir = common_git_dir.to_str().ok_or_else(|| {
+            LprmError::internal("The canonical common Git directory is not valid UTF-8")
+        })?;
+        self.connection
+            .execute(
+                "INSERT INTO repositories(\
+                    id, common_git_dir, target_branch, created_at, config_hash\
+                 ) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?4) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                    target_branch = excluded.target_branch, \
+                    config_hash = excluded.config_hash",
+                (repository_id, common_git_dir, target_branch, config_hash),
+            )
+            .map_err(|error| persistence_error("register repository state", error))?;
+        Ok(())
     }
 
     fn initialize(mut connection: Connection, file_backed: bool) -> Result<Self, LprmError> {
@@ -236,4 +333,48 @@ fn migrate_to_one(connection: &mut Connection) -> Result<(), LprmError> {
 
 fn persistence_error(operation: &str, error: impl std::fmt::Display) -> LprmError {
     LprmError::internal(format!("Unable to {operation}: {error}"))
+}
+
+fn default_state_root() -> Result<PathBuf, LprmError> {
+    if let Some(override_path) = env::var_os("LPRM_STATE_HOME") {
+        if override_path.is_empty() {
+            return Err(LprmError::internal("LPRM_STATE_HOME must not be empty"));
+        }
+        return Ok(PathBuf::from(override_path));
+    }
+
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| LprmError::internal("HOME is unavailable for LPRM state discovery"))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        Ok(home
+            .join("Library")
+            .join("Application Support")
+            .join("lprm"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(env::var_os("XDG_STATE_HOME")
+            .filter(|value| !value.is_empty())
+            .map_or_else(
+                || home.join(".local/state/lprm"),
+                |value| PathBuf::from(value).join("lprm"),
+            ))
+    }
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path) -> Result<(), LprmError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|error| persistence_error("set private state permissions", error))
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path) -> Result<(), LprmError> {
+    Ok(())
 }

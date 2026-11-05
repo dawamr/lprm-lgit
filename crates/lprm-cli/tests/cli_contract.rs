@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::Value;
@@ -16,6 +17,33 @@ fn lprm_in(directory: &std::path::Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .expect("lprm should start")
+}
+
+fn lprm_in_with_state(directory: &Path, state: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_lprm"))
+        .current_dir(directory)
+        .env("LPRM_STATE_HOME", state)
+        .args(args)
+        .output()
+        .expect("lprm should start")
+}
+
+fn run_git(directory: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .current_dir(directory)
+        .args(args)
+        .status()
+        .expect("git should start");
+    assert!(status.success(), "git command failed: {args:?}");
+}
+
+fn initialize_repository(directory: &Path) {
+    run_git(directory, &["init", "--quiet", "--initial-branch=dev"]);
+    run_git(directory, &["config", "user.name", "LPRM Test"]);
+    run_git(directory, &["config", "user.email", "lprm@example.invalid"]);
+    std::fs::write(directory.join("README.md"), "fixture\n").expect("fixture should be written");
+    run_git(directory, &["add", "README.md"]);
+    run_git(directory, &["commit", "--quiet", "-m", "fixture"]);
 }
 
 #[test]
@@ -87,6 +115,68 @@ fn config_show_rejects_an_unknown_schema() {
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(document["error"]["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
+fn init_persists_external_state_and_is_idempotent_without_a_remote() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    std::fs::create_dir(&repository).expect("repository directory should be created");
+    initialize_repository(&repository);
+
+    let first = lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"]);
+    let first_document: Value =
+        serde_json::from_slice(&first.stdout).expect("stdout should be JSON");
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(first_document["data"]["target_branch"], "dev");
+    assert!(
+        first_document["data"]["target_sha"]
+            .as_str()
+            .is_some_and(|sha| sha.len() >= 40)
+    );
+
+    let database_path = Path::new(
+        first_document["data"]["database_path"]
+            .as_str()
+            .expect("database path should be a string"),
+    );
+    assert!(database_path.starts_with(&state));
+    assert!(database_path.exists());
+    assert!(!repository.join(".lprm.toml").exists());
+
+    let second = lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"]);
+    let second_document: Value =
+        serde_json::from_slice(&second.stdout).expect("stdout should be JSON");
+    assert!(second.status.success());
+    assert_eq!(
+        first_document["data"]["repository_id"],
+        second_document["data"]["repository_id"]
+    );
+}
+
+#[test]
+fn init_rejects_a_missing_target_branch() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    std::fs::create_dir(&repository).expect("repository directory should be created");
+    initialize_repository(&repository);
+
+    let output = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "init", "--target", "missing"],
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(document["error"]["code"], "GIT_PRECONDITION");
+    assert!(!state.exists());
 }
 
 #[test]

@@ -150,6 +150,35 @@ impl Git {
         Ok(String::from_utf8_lossy(&help).contains("--write-tree"))
     }
 
+    /// Resolves a local branch to its exact commit object ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Git precondition error when the branch name is invalid, absent, or not a commit.
+    pub fn resolve_local_branch(&self, path: &Path, branch: &str) -> Result<String, LprmError> {
+        let valid = self.run(path, &["check-ref-format", "--branch", branch])?;
+        if !valid.status.success() {
+            return Err(LprmError::git_precondition(format!(
+                "Invalid target branch {branch:?}"
+            )));
+        }
+
+        let revision = format!("refs/heads/{branch}^{{commit}}");
+        let output = self.run(path, &["rev-parse", "--verify", &revision])?;
+        if !output.status.success() {
+            return Err(LprmError::git_precondition(format!(
+                "Target branch {branch:?} does not exist or has no commit"
+            )));
+        }
+        let object_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !is_object_id(&object_id) {
+            return Err(LprmError::git_precondition(
+                "Git returned an invalid commit object ID",
+            ));
+        }
+        Ok(object_id)
+    }
+
     fn required_path(
         &self,
         path: &Path,
@@ -249,6 +278,10 @@ fn parse_numeric_component(value: Option<&str>, name: &str) -> Result<u32, LprmE
     numeric.parse().map_err(|_| {
         LprmError::git_precondition(format!("Git returned an invalid {name} version component"))
     })
+}
+
+fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
