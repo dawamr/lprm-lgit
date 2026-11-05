@@ -3,6 +3,7 @@
 mod config;
 mod error;
 mod output;
+mod pr;
 mod worktree;
 
 pub use config::{
@@ -11,6 +12,7 @@ pub use config::{
 };
 pub use error::{ErrorCode, LprmError};
 pub use output::{ApiError, Envelope, SCHEMA_VERSION};
+pub use pr::PullRequestStatus;
 pub use worktree::{WorktreeSpec, validate_managed_worktree_path};
 
 /// The workspace package version.

@@ -121,10 +121,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T11: Enforce the PR state machine
 
 **Acceptance criteria:**
-- [ ] Only documented transitions are allowed and terminal states cannot be reopened under the same PR ID.
+- [x] Only documented transitions are allowed and terminal states cannot be reopened under the same PR ID.
 
 **Verification:**
-- [ ] Table-driven transition tests cover every state pair.
+- [x] Table-driven transition tests cover every state pair.
 
 **Dependencies:** T09
 
