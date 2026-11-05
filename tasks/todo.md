@@ -49,10 +49,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T04: Load and validate configuration
 
 **Acceptance criteria:**
-- [ ] Defaults and TOML schema v1 validate target, roots, checks, merge policy, and review policy.
+- [x] Defaults and TOML schema v1 validate target, roots, checks, merge policy, and review policy.
 
 **Verification:**
-- [ ] Config round-trip and invalid-config tests pass.
+- [x] Config round-trip and invalid-config tests pass.
 
 **Dependencies:** T02, T03
 

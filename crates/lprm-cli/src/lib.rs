@@ -240,7 +240,7 @@ where
 }
 
 fn execute(cli: &Cli) -> Result<Value, LprmError> {
-    match cli.command {
+    match &cli.command {
         Command::Doctor => {
             let current_directory = std::env::current_dir()
                 .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
@@ -248,6 +248,16 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             serde_json::to_value(report)
                 .map_err(|_| LprmError::internal("Doctor report serialization failed"))
         }
+        Command::Config(arguments) => match arguments.command {
+            ConfigCommand::Show => {
+                let current_directory = std::env::current_dir()
+                    .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+                let repository = lprm_git::Git::default().discover(&current_directory)?;
+                let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
+                serde_json::to_value(config)
+                    .map_err(|_| LprmError::internal("Config serialization failed"))
+            }
+        },
         _ => Err(LprmError::internal(format!(
             "{} is not implemented yet",
             cli.command_name()

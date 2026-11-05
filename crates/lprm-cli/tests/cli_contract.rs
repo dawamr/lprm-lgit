@@ -49,6 +49,47 @@ fn doctor_reports_a_git_precondition_outside_a_repository() {
 }
 
 #[test]
+fn config_show_returns_validated_defaults() {
+    let repository = tempdir().expect("temporary directory should be created");
+    let git = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(repository.path())
+        .status()
+        .expect("git should start");
+    assert!(git.success());
+
+    let output = lprm_in(repository.path(), &["--json", "config", "show"]);
+    let document: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    assert!(output.status.success());
+    assert_eq!(document["data"]["schema_version"], 1);
+    assert_eq!(document["data"]["repository"]["target_branch"], "dev");
+    assert_eq!(document["data"]["merge"]["strategy"], "no-ff");
+}
+
+#[test]
+fn config_show_rejects_an_unknown_schema() {
+    let repository = tempdir().expect("temporary directory should be created");
+    let git = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(repository.path())
+        .status()
+        .expect("git should start");
+    assert!(git.success());
+    std::fs::write(
+        repository.path().join(".lprm.toml"),
+        "schema_version = 99\n",
+    )
+    .expect("config fixture should be written");
+
+    let output = lprm_in(repository.path(), &["--json", "config", "show"]);
+    let document: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(document["error"]["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
 fn json_mode_maps_argument_errors_to_exit_code_two() {
     let output = lprm(&["--json", "worktree", "status"]);
     let document: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
