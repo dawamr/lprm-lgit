@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lprm_core::{ChecksConfig, ErrorCode};
-use lprm_git::{Git, GuardedMerge};
+use lprm_git::{Git, GuardedMerge, MergeRecovery};
 use lprm_runner::{CheckRunner, CheckStatus};
 use tempfile::{TempDir, tempdir};
 
@@ -254,6 +254,93 @@ fn failed_guarded_merge_aborts_without_target_mutation() {
         &fixture.repository,
         &["rev-parse", "--verify", "MERGE_HEAD"]
     ));
+}
+
+#[test]
+fn recovery_classifies_an_unchanged_clean_target_as_not_integrated() {
+    let fixture = integration_fixture();
+    let candidate = create_candidate(&fixture);
+    git(&fixture.repository, &["checkout", "dev"]);
+
+    let recovery = Git::default()
+        .classify_merge_recovery(
+            &fixture.repository,
+            "dev",
+            &fixture.target_sha,
+            &fixture.source_sha,
+            Some(candidate.commit_sha()),
+        )
+        .expect("unchanged target should be inspectable");
+
+    assert_eq!(
+        recovery,
+        MergeRecovery::NotIntegrated {
+            target_sha: fixture.target_sha
+        }
+    );
+}
+
+#[test]
+fn recovery_finds_the_exact_merge_in_target_ancestry() {
+    let fixture = integration_fixture();
+    let candidate = create_candidate(&fixture);
+    let candidate_commit = candidate.commit_sha().to_owned();
+    git(&fixture.repository, &["checkout", "dev"]);
+    let GuardedMerge::Verified(merged) = Git::default()
+        .guarded_merge(
+            &fixture.repository,
+            "dev",
+            &fixture.target_sha,
+            &fixture.source_sha,
+            candidate.tree_sha(),
+        )
+        .unwrap()
+    else {
+        panic!("fixture merge should verify");
+    };
+    fs::write(fixture.repository.join("later.txt"), "later\n").unwrap();
+    git(&fixture.repository, &["add", "later.txt"]);
+    git(&fixture.repository, &["commit", "-m", "later target work"]);
+
+    let recovery = Git::default()
+        .classify_merge_recovery(
+            &fixture.repository,
+            "dev",
+            &fixture.target_sha,
+            &fixture.source_sha,
+            Some(&candidate_commit),
+        )
+        .expect("target ancestry should be inspectable");
+
+    assert_eq!(recovery, MergeRecovery::Verified(merged));
+}
+
+#[test]
+fn recovery_requires_operator_review_for_unrelated_target_movement() {
+    let fixture = integration_fixture();
+    let candidate = create_candidate(&fixture);
+    git(&fixture.repository, &["checkout", "dev"]);
+    fs::write(fixture.repository.join("race.flag"), "race\n").unwrap();
+    git(&fixture.repository, &["add", "race.flag"]);
+    git(&fixture.repository, &["commit", "-m", "external race"]);
+    let observed_target = git_stdout(&fixture.repository, &["rev-parse", "dev"]);
+
+    let recovery = Git::default()
+        .classify_merge_recovery(
+            &fixture.repository,
+            "dev",
+            &fixture.target_sha,
+            &fixture.source_sha,
+            Some(candidate.commit_sha()),
+        )
+        .expect("changed target should be classified");
+
+    assert_eq!(
+        recovery,
+        MergeRecovery::NeedsOperatorReview {
+            target_sha: observed_target
+        }
+    );
 }
 
 fn integration_fixture() -> Fixture {

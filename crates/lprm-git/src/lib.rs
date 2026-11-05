@@ -120,6 +120,14 @@ pub enum GuardedMerge {
     Diverged(IntegratedMerge),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", content = "merge", rename_all = "snake_case")]
+pub enum MergeRecovery {
+    NotIntegrated { target_sha: String },
+    Verified(IntegratedMerge),
+    NeedsOperatorReview { target_sha: String },
+}
+
 #[derive(Clone, Debug)]
 pub struct Git {
     executable: PathBuf,
@@ -509,6 +517,83 @@ impl Git {
         }
     }
 
+    /// Classifies persisted merge evidence against the target branch ancestry.
+    ///
+    /// An unchanged target is retryable only when its checkout is clean. A changed target is
+    /// verified only when exactly one reachable commit has the persisted parents and candidate
+    /// tree. Every other observation is left for operator review without modifying Git.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Git precondition error when refs, worktrees, or commit evidence cannot be read.
+    pub fn classify_merge_recovery(
+        &self,
+        repository: &Path,
+        target_branch: &str,
+        target_before_sha: &str,
+        source_sha: &str,
+        candidate_commit_sha: Option<&str>,
+    ) -> Result<MergeRecovery, LprmError> {
+        self.verify_commit(repository, target_before_sha, "recovery target")?;
+        self.verify_commit(repository, source_sha, "recovery source")?;
+        let target_sha = self.resolve_local_branch(repository, target_branch)?;
+        let target_worktree = self
+            .list_worktrees(repository)?
+            .into_iter()
+            .find(|worktree| worktree.branch.as_deref() == Some(target_branch));
+        let target_observation = match target_worktree {
+            Some(worktree) => Some(self.observe_worktree(&worktree.path)?),
+            None => None,
+        };
+
+        if target_sha == target_before_sha {
+            let clean_exact_checkout = target_observation.as_ref().is_some_and(|observation| {
+                observation.head_sha.as_deref() == Some(target_before_sha)
+                    && observation.dirty == Some(false)
+            });
+            return if clean_exact_checkout {
+                Ok(MergeRecovery::NotIntegrated { target_sha })
+            } else {
+                Ok(MergeRecovery::NeedsOperatorReview { target_sha })
+            };
+        }
+
+        let Some(candidate_commit_sha) = candidate_commit_sha else {
+            return Ok(MergeRecovery::NeedsOperatorReview { target_sha });
+        };
+        let candidate_revision = format!("{candidate_commit_sha}^{{tree}}");
+        let candidate_tree =
+            self.run(repository, &["rev-parse", "--verify", &candidate_revision])?;
+        if !candidate_tree.status.success() {
+            return Ok(MergeRecovery::NeedsOperatorReview { target_sha });
+        }
+        let candidate_tree = parse_single_object_id(&candidate_tree.stdout, "candidate tree")?;
+        let range = format!("{target_before_sha}..{target_sha}");
+        let descendants = self.run(repository, &["rev-list", &range])?;
+        if !descendants.status.success() {
+            return Err(LprmError::git_precondition(
+                "Git could not inspect target recovery ancestry",
+            ));
+        }
+        let worktree_clean = target_observation
+            .as_ref()
+            .is_some_and(|observation| observation.dirty == Some(false));
+        let mut matches = Vec::new();
+        for commit_sha in parse_object_ids(&descendants.stdout)? {
+            let evidence = self.inspect_commit(repository, &commit_sha, worktree_clean)?;
+            if evidence.parents == [target_before_sha.to_owned(), source_sha.to_owned()]
+                && evidence.tree_sha == candidate_tree
+            {
+                matches.push(evidence);
+            }
+        }
+        if matches.len() == 1 {
+            Ok(MergeRecovery::Verified(matches.remove(0)))
+        } else {
+            Ok(MergeRecovery::NeedsOperatorReview { target_sha })
+        }
+    }
+
     /// Inspects the current branch, HEAD, and dirty state of a registered worktree.
     ///
     /// # Errors
@@ -882,14 +967,24 @@ impl Git {
         let commit_sha = observation
             .head_sha
             .ok_or_else(|| LprmError::internal("Integrated target HEAD is unavailable"))?;
-        let tree = self.run(repository, &["rev-parse", "--verify", "HEAD^{tree}"])?;
+        self.inspect_commit(repository, &commit_sha, observation.dirty == Some(false))
+    }
+
+    fn inspect_commit(
+        &self,
+        repository: &Path,
+        commit_sha: &str,
+        worktree_clean: bool,
+    ) -> Result<IntegratedMerge, LprmError> {
+        let tree_revision = format!("{commit_sha}^{{tree}}");
+        let tree = self.run(repository, &["rev-parse", "--verify", &tree_revision])?;
         if !tree.status.success() {
             return Err(LprmError::internal("Integrated target tree is unavailable"));
         }
         let tree_sha = parse_single_object_id(&tree.stdout, "integrated tree")?;
         let parents = self.run(
             repository,
-            &["rev-list", "--parents", "-n", "1", &commit_sha],
+            &["rev-list", "--parents", "-n", "1", commit_sha],
         )?;
         if !parents.status.success() {
             return Err(LprmError::internal(
@@ -897,17 +992,17 @@ impl Git {
             ));
         }
         let mut object_ids = parse_parent_ids(&parents.stdout)?;
-        if object_ids.first() != Some(&commit_sha) {
+        if object_ids.first().map(String::as_str) != Some(commit_sha) {
             return Err(LprmError::internal(
                 "Integrated target parent evidence is inconsistent",
             ));
         }
         object_ids.remove(0);
         Ok(IntegratedMerge {
-            target_after_sha: commit_sha,
+            target_after_sha: commit_sha.to_owned(),
             tree_sha,
             parents: object_ids,
-            worktree_clean: observation.dirty == Some(false),
+            worktree_clean,
         })
     }
 
