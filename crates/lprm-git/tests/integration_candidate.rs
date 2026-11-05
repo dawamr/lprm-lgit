@@ -4,8 +4,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use lprm_core::ChecksConfig;
-use lprm_git::Git;
+use lprm_core::{ChecksConfig, ErrorCode};
+use lprm_git::{Git, GuardedMerge};
 use lprm_runner::{CheckRunner, CheckStatus};
 use tempfile::{TempDir, tempdir};
 
@@ -121,6 +121,141 @@ fn combined_required_check_failure_is_observed_and_candidate_is_cleaned() {
     );
 }
 
+#[test]
+fn guarded_merge_matches_candidate_tree_and_exact_parents() {
+    let fixture = integration_fixture();
+    let candidate = create_candidate(&fixture);
+    git(&fixture.repository, &["checkout", "dev"]);
+
+    let outcome = Git::default()
+        .guarded_merge(
+            &fixture.repository,
+            "dev",
+            &fixture.target_sha,
+            &fixture.source_sha,
+            candidate.tree_sha(),
+        )
+        .expect("guarded merge should run");
+    let GuardedMerge::Verified(merged) = outcome else {
+        panic!("matching merge should verify");
+    };
+
+    assert_eq!(
+        git_stdout(&fixture.repository, &["rev-parse", "refs/heads/dev"]),
+        merged.target_after_sha
+    );
+    assert_eq!(merged.tree_sha, candidate.tree_sha());
+    assert_eq!(
+        git_stdout(
+            &fixture.repository,
+            &["rev-list", "--parents", "-n", "1", &merged.target_after_sha]
+        )
+        .split_whitespace()
+        .collect::<Vec<_>>(),
+        [
+            merged.target_after_sha.as_str(),
+            fixture.target_sha.as_str(),
+            fixture.source_sha.as_str(),
+        ]
+    );
+}
+
+#[test]
+fn guarded_merge_rejects_target_race_before_source_integration() {
+    let fixture = integration_fixture();
+    let candidate = create_candidate(&fixture);
+    git(&fixture.repository, &["checkout", "dev"]);
+    fs::write(fixture.repository.join("race.flag"), "race\n").unwrap();
+    git(&fixture.repository, &["add", "race.flag"]);
+    git(&fixture.repository, &["commit", "-m", "external race"]);
+    let raced_sha = git_stdout(&fixture.repository, &["rev-parse", "HEAD"]);
+
+    let error = Git::default()
+        .guarded_merge(
+            &fixture.repository,
+            "dev",
+            &fixture.target_sha,
+            &fixture.source_sha,
+            candidate.tree_sha(),
+        )
+        .expect_err("changed target must be stale");
+
+    assert_eq!(error.code, ErrorCode::StaleRevision);
+    assert_eq!(
+        git_stdout(&fixture.repository, &["rev-parse", "refs/heads/dev"]),
+        raced_sha
+    );
+    assert!(!git_status(
+        &fixture.repository,
+        &["merge-base", "--is-ancestor", &fixture.source_sha, "HEAD"]
+    ));
+}
+
+#[test]
+fn guarded_merge_reports_hook_tree_difference() {
+    let fixture = integration_fixture();
+    let candidate = create_candidate(&fixture);
+    git(&fixture.repository, &["checkout", "dev"]);
+    install_hook(
+        &fixture.repository,
+        "post-merge",
+        "#!/bin/sh\nprintf 'hook changed tree\\n' > hook.flag\ngit add hook.flag\nold=$(git rev-parse HEAD)\ntree=$(git write-tree)\nnew=$(git commit-tree \"$tree\" -p \"$old^1\" -p \"$old^2\" -m 'hook merge')\ngit update-ref HEAD \"$new\" \"$old\"\n",
+    );
+
+    let outcome = Git::default()
+        .guarded_merge(
+            &fixture.repository,
+            "dev",
+            &fixture.target_sha,
+            &fixture.source_sha,
+            candidate.tree_sha(),
+        )
+        .expect("merge should finish with divergent evidence");
+    let GuardedMerge::Diverged(merged) = outcome else {
+        panic!("hook-mutated merge must diverge");
+    };
+
+    assert_ne!(merged.tree_sha, candidate.tree_sha());
+    assert_ne!(merged.target_after_sha, fixture.target_sha);
+    assert!(fixture.repository.join("hook.flag").is_file());
+}
+
+#[test]
+fn failed_guarded_merge_aborts_without_target_mutation() {
+    let fixture = integration_fixture();
+    let candidate = create_candidate(&fixture);
+    git(&fixture.repository, &["checkout", "dev"]);
+    install_hook(
+        &fixture.repository,
+        "pre-merge-commit",
+        "#!/bin/sh\nexit 42\n",
+    );
+
+    let error = Git::default()
+        .guarded_merge(
+            &fixture.repository,
+            "dev",
+            &fixture.target_sha,
+            &fixture.source_sha,
+            candidate.tree_sha(),
+        )
+        .expect_err("rejected merge must fail");
+
+    assert_eq!(error.code, ErrorCode::ValidationFailed);
+    assert_eq!(
+        git_stdout(&fixture.repository, &["rev-parse", "refs/heads/dev"]),
+        fixture.target_sha
+    );
+    assert_eq!(
+        git_stdout(&fixture.repository, &["status", "--porcelain"]),
+        ""
+    );
+    assert!(!git_status(
+        &fixture.repository,
+        &["rev-parse", "--verify", "MERGE_HEAD"]
+    ));
+}
+
 fn integration_fixture() -> Fixture {
     let temporary = tempdir().expect("temporary directory should create");
     let repository = temporary.path().join("repository");
@@ -170,6 +305,25 @@ fn integration_fixture() -> Fixture {
     }
 }
 
+fn create_candidate(fixture: &Fixture) -> lprm_git::IntegrationCandidate {
+    let candidate_root = fixture.temporary.path().join("guarded-candidates");
+    fs::create_dir_all(&candidate_root).unwrap();
+    Git::default()
+        .create_integration_candidate(
+            &fixture.repository,
+            &candidate_root,
+            &fixture.target_sha,
+            &fixture.source_sha,
+        )
+        .expect("exact commits should produce a candidate")
+}
+
+fn install_hook(repository: &Path, name: &str, contents: &str) {
+    let path = repository.join(".git/hooks").join(name);
+    fs::write(&path, contents).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 fn git(repository: &Path, arguments: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
@@ -193,4 +347,15 @@ fn git_stdout(repository: &Path, arguments: &[&str]) -> String {
         .expect("Git should start");
     assert!(output.status.success(), "Git failed: {arguments:?}");
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn git_status(repository: &Path, arguments: &[&str]) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .expect("Git should start")
+        .status
+        .success()
 }

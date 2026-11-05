@@ -105,6 +105,21 @@ pub enum MergePreflight {
     Conflict,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct IntegratedMerge {
+    pub target_after_sha: String,
+    pub tree_sha: String,
+    pub parents: Vec<String>,
+    pub worktree_clean: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", content = "merge", rename_all = "snake_case")]
+pub enum GuardedMerge {
+    Verified(IntegratedMerge),
+    Diverged(IntegratedMerge),
+}
+
 #[derive(Clone, Debug)]
 pub struct Git {
     executable: PathBuf,
@@ -438,6 +453,62 @@ impl Git {
         Ok(candidate)
     }
 
+    /// Merges an exact source into the checked-out target and verifies candidate equivalence.
+    ///
+    /// The operation rejects a changed target before invoking merge. A successful Git merge is
+    /// reported as divergent rather than accepted when its parents, tree, branch ref, or worktree
+    /// cleanliness differ from the tested candidate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale-revision error for a target race, a validation error when Git safely rejects
+    /// and aborts the merge, or a precondition/internal error for unsafe repository state.
+    pub fn guarded_merge(
+        &self,
+        repository: &Path,
+        target_branch: &str,
+        target_before_sha: &str,
+        source_sha: &str,
+        candidate_tree_sha: &str,
+    ) -> Result<GuardedMerge, LprmError> {
+        self.verify_commit(repository, target_before_sha, "target")?;
+        self.verify_commit(repository, source_sha, "source")?;
+        self.verify_tree(repository, candidate_tree_sha)?;
+        self.verify_guarded_merge_start(repository, target_branch, target_before_sha)?;
+
+        let merged = Command::new(&self.executable)
+            .arg("-C")
+            .arg(repository)
+            .args(["merge", "--no-ff", "--no-edit", "--no-gpg-sign"])
+            .arg(source_sha)
+            .env("GIT_AUTHOR_NAME", "LPRM Coordinator")
+            .env("GIT_AUTHOR_EMAIL", "lprm@localhost")
+            .env("GIT_COMMITTER_NAME", "LPRM Coordinator")
+            .env("GIT_COMMITTER_EMAIL", "lprm@localhost")
+            .output()
+            .map_err(|_| LprmError::git_precondition("Git executable is unavailable"))?;
+        if !merged.status.success() {
+            self.abort_rejected_merge(repository, target_before_sha)?;
+            return Err(LprmError::validation_failed(
+                "Git rejected the guarded merge and the target was restored",
+            ));
+        }
+
+        let evidence = self.inspect_integrated_merge(repository)?;
+        let target_after = self.resolve_local_branch(repository, target_branch)?;
+        let exact_parents =
+            evidence.parents == [target_before_sha.to_owned(), source_sha.to_owned()];
+        let verified = target_after == evidence.target_after_sha
+            && evidence.tree_sha == candidate_tree_sha
+            && exact_parents
+            && evidence.worktree_clean;
+        if verified {
+            Ok(GuardedMerge::Verified(evidence))
+        } else {
+            Ok(GuardedMerge::Diverged(evidence))
+        }
+    }
+
     /// Inspects the current branch, HEAD, and dirty state of a registered worktree.
     ///
     /// # Errors
@@ -728,6 +799,116 @@ impl Git {
             )));
         }
         Ok(())
+    }
+
+    fn verify_tree(&self, repository: &Path, object_id: &str) -> Result<(), LprmError> {
+        if !is_object_id(object_id) {
+            return Err(LprmError::git_precondition(
+                "Candidate tree is not a full object ID",
+            ));
+        }
+        let output = self.run(repository, &["cat-file", "-t", object_id])?;
+        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "tree" {
+            return Err(LprmError::git_precondition(
+                "Candidate tree object does not exist",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_guarded_merge_start(
+        &self,
+        repository: &Path,
+        target_branch: &str,
+        target_before_sha: &str,
+    ) -> Result<(), LprmError> {
+        let observation = self.observe_worktree(repository)?;
+        if observation.actual_branch.as_deref() != Some(target_branch) {
+            return Err(LprmError::git_precondition(format!(
+                "Coordinator checkout must have target branch {target_branch:?} checked out"
+            )));
+        }
+        if observation.dirty != Some(false) {
+            return Err(LprmError::validation_failed(
+                "Coordinator checkout must be clean before integration",
+            ));
+        }
+        let target_sha = self.resolve_local_branch(repository, target_branch)?;
+        if target_sha != target_before_sha
+            || observation.head_sha.as_deref() != Some(target_before_sha)
+        {
+            return Err(LprmError::stale_revision(
+                "Target branch changed after candidate validation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn abort_rejected_merge(
+        &self,
+        repository: &Path,
+        target_before_sha: &str,
+    ) -> Result<(), LprmError> {
+        let head = self.run(repository, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+        if !head.status.success()
+            || parse_single_object_id(&head.stdout, "guarded merge HEAD")? != target_before_sha
+        {
+            return Err(LprmError::internal(
+                "Rejected merge changed target HEAD and requires reconciliation",
+            ));
+        }
+        let merge_head = self.run(repository, &["rev-parse", "--verify", "MERGE_HEAD"])?;
+        if merge_head.status.success() {
+            let aborted = self.run(repository, &["merge", "--abort"])?;
+            if !aborted.status.success() {
+                return Err(LprmError::internal(
+                    "Git could not abort the rejected guarded merge",
+                ));
+            }
+        }
+        let observation = self.observe_worktree(repository)?;
+        if observation.head_sha.as_deref() != Some(target_before_sha)
+            || observation.dirty != Some(false)
+        {
+            return Err(LprmError::internal(
+                "Rejected merge left repository state requiring reconciliation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn inspect_integrated_merge(&self, repository: &Path) -> Result<IntegratedMerge, LprmError> {
+        let observation = self.observe_worktree(repository)?;
+        let commit_sha = observation
+            .head_sha
+            .ok_or_else(|| LprmError::internal("Integrated target HEAD is unavailable"))?;
+        let tree = self.run(repository, &["rev-parse", "--verify", "HEAD^{tree}"])?;
+        if !tree.status.success() {
+            return Err(LprmError::internal("Integrated target tree is unavailable"));
+        }
+        let tree_sha = parse_single_object_id(&tree.stdout, "integrated tree")?;
+        let parents = self.run(
+            repository,
+            &["rev-list", "--parents", "-n", "1", &commit_sha],
+        )?;
+        if !parents.status.success() {
+            return Err(LprmError::internal(
+                "Integrated target parents are unavailable",
+            ));
+        }
+        let mut object_ids = parse_parent_ids(&parents.stdout)?;
+        if object_ids.first() != Some(&commit_sha) {
+            return Err(LprmError::internal(
+                "Integrated target parent evidence is inconsistent",
+            ));
+        }
+        object_ids.remove(0);
+        Ok(IntegratedMerge {
+            target_after_sha: commit_sha,
+            tree_sha,
+            parents: object_ids,
+            worktree_clean: observation.dirty == Some(false),
+        })
     }
 
     fn required_path(
