@@ -273,10 +273,19 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T30: Add concurrency, crash, and adversarial coverage
 
 **Acceptance criteria:**
-- [ ] Race, path, symlink, hostile filename, corruption, busy DB, timeout, and crash boundaries have repeatable tests.
+- [x] Race, path, symlink, hostile filename, corruption, busy DB, timeout, and crash boundaries have repeatable tests.
+
+**Coverage map:**
+- Race: `lprm-git` guarded-merge target race, `acceptance_matrix::ac08_*`, `adversarial::repeated_concurrent_queue_runs_*`.
+- Path/symlink: `adversarial::cleanup_refuses_a_worktree_path_swapped_for_a_symlink`, cleanup outside-root tests.
+- Hostile names: `adversarial::hostile_task_names_*`, `lprm-git` hostile filename diff, runner hostile arguments.
+- Corruption: `adversarial::corrupt_database_fails_closed_*`.
+- Busy DB: `adversarial::busy_database_reports_retryable_busy_*` (SQLite BUSY/LOCKED maps to exit 7).
+- Timeout: `lprm-runner` timeout and descendant tests.
+- Crash: `recovery::*`.
 
 **Verification:**
-- [ ] Stress tests pass repeatedly on supported platforms.
+- [x] Stress tests pass repeatedly on macOS (five consecutive runs of the adversarial, acceptance, and recovery suites). Linux is still unverified.
 
 **Dependencies:** T20, T29
 

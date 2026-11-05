@@ -392,6 +392,7 @@ dependencies = [
  "lprm-git",
  "lprm-runner",
  "lprm-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

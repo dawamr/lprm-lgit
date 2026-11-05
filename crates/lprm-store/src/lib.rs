@@ -2120,8 +2120,21 @@ fn migrate_to_one(connection: &mut Connection) -> Result<(), LprmError> {
         .map_err(|error| persistence_error("commit SQLite migration", error))
 }
 
-fn persistence_error(operation: &str, error: impl std::fmt::Display) -> LprmError {
-    LprmError::internal(format!("Unable to {operation}: {error}"))
+fn persistence_error<E: std::fmt::Display + 'static>(operation: &str, error: E) -> LprmError {
+    let contended = (&error as &dyn std::any::Any)
+        .downcast_ref::<rusqlite::Error>()
+        .and_then(rusqlite::Error::sqlite_error_code)
+        .is_some_and(|code| {
+            matches!(
+                code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+        });
+    if contended {
+        LprmError::busy(format!("Unable to {operation}: database is busy"))
+    } else {
+        LprmError::internal(format!("Unable to {operation}: {error}"))
+    }
 }
 
 fn parse_pull_request_status(value: &str) -> Result<PullRequestStatus, LprmError> {
