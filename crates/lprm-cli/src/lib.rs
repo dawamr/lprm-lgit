@@ -434,11 +434,8 @@ fn check_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
             lprm_core::PullRequestStatus::Conflict,
             &transition_evidence(revision, "merge conflict detected"),
         )?;
-        return Err(LprmError::new(
-            lprm_core::ErrorCode::Conflict,
+        return Err(LprmError::conflict(
             "Pull request conflicts with the target branch",
-            serde_json::json!({}),
-            false,
         ));
     }
     let run_id = uuid::Uuid::now_v7().simple().to_string();
@@ -533,11 +530,8 @@ fn enqueue_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
         &fingerprint.source_sha,
     )? == lprm_git::MergePreflight::Conflict
     {
-        return Err(LprmError::new(
-            lprm_core::ErrorCode::Conflict,
+        return Err(LprmError::conflict(
             "Pull request conflicts with the target branch",
-            serde_json::json!({}),
-            false,
         ));
     }
     let queued = store.enqueue_pull_request(

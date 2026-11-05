@@ -73,6 +73,15 @@ impl LprmError {
         )
     }
 
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorCode::Conflict,
+            message,
+            Value::Object(Map::default()),
+            false,
+        )
+    }
+
     pub fn validation_failed(message: impl Into<String>) -> Self {
         Self::new(
             ErrorCode::ValidationFailed,
