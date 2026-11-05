@@ -29,10 +29,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T02: Define CLI, JSON, errors, and diagnostics
 
 **Acceptance criteria:**
-- [ ] Commands parse noninteractively, JSON envelopes are deterministic, and error categories map to exit codes 2–8.
+- [x] Commands parse noninteractively, JSON envelopes are deterministic, and error categories map to exit codes 2–8.
 
 **Verification:**
-- [ ] Unit and CLI contract tests pass.
+- [x] Unit and CLI contract tests pass.
 
 **Dependencies:** T01
 
