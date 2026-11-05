@@ -205,6 +205,15 @@ struct InitReport {
     database_path: std::path::PathBuf,
 }
 
+#[derive(Debug, Serialize)]
+struct WorktreeCreateReport {
+    id: String,
+    branch: String,
+    path: std::path::PathBuf,
+    target_sha: String,
+    owner_agent: Option<String>,
+}
+
 pub fn run() -> i32 {
     run_from(std::env::args_os())
 }
@@ -268,11 +277,76 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
                     .map_err(|_| LprmError::internal("Config serialization failed"))
             }
         },
+        Command::Worktree(arguments) => match &arguments.command {
+            WorktreeCommand::Create(create) => create_worktree(create),
+            _ => Err(LprmError::internal(
+                "worktree command is not implemented yet",
+            )),
+        },
         _ => Err(LprmError::internal(format!(
             "{} is not implemented yet",
             cli.command_name()
         ))),
     }
+}
+
+fn create_worktree(arguments: &WorktreeCreateArgs) -> Result<Value, LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let repository = lprm_git::Git::default().discover(&current_directory)?;
+    let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
+    let layout = lprm_store::StateLayout::for_repository(&repository.common_git_dir)?;
+    if !layout.database_path().is_file() {
+        return Err(LprmError::git_precondition(
+            "Repository is not initialized; run lprm init first",
+        ));
+    }
+    let store = lprm_store::Store::open(layout.database_path())?;
+    let target_branch = store
+        .repository_target(layout.repository_id())?
+        .ok_or_else(|| {
+            LprmError::git_precondition("Repository is not initialized; run lprm init first")
+        })?;
+    let git = lprm_git::Git::default();
+    let target_sha = git.resolve_local_branch(&repository.worktree_root, &target_branch)?;
+    let spec = lprm_core::WorktreeSpec::new(&arguments.task)?;
+
+    let configured_root = if config.repository.worktree_root.is_absolute() {
+        config.repository.worktree_root
+    } else {
+        repository
+            .worktree_root
+            .join(config.repository.worktree_root)
+    };
+    std::fs::create_dir_all(&configured_root)
+        .map_err(|error| LprmError::internal(format!("Unable to create worktree root: {error}")))?;
+    let worktree_root = std::fs::canonicalize(&configured_root).map_err(|error| {
+        LprmError::internal(format!("Unable to resolve worktree root: {error}"))
+    })?;
+    let worktree_path = worktree_root.join(spec.directory_name());
+
+    git.create_linked_worktree(
+        &repository.worktree_root,
+        spec.branch(),
+        &worktree_path,
+        &target_sha,
+    )?;
+    store.register_worktree(
+        spec.id(),
+        layout.repository_id(),
+        spec.branch(),
+        &worktree_path,
+        arguments.agent.as_deref(),
+    )?;
+
+    serde_json::to_value(WorktreeCreateReport {
+        id: spec.id().to_owned(),
+        branch: spec.branch().to_owned(),
+        path: worktree_path,
+        target_sha,
+        owner_agent: arguments.agent.clone(),
+    })
+    .map_err(|_| LprmError::internal("Worktree report serialization failed"))
 }
 
 fn initialize_repository(arguments: &InitArgs) -> Result<Value, LprmError> {

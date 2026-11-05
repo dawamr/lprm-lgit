@@ -180,6 +180,91 @@ fn init_rejects_a_missing_target_branch() {
 }
 
 #[test]
+fn worktree_create_builds_distinct_checkouts_from_the_exact_target() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    std::fs::create_dir(&repository).expect("repository directory should be created");
+    initialize_repository(&repository);
+    let target_sha = git_stdout(&repository, &["rev-parse", "dev"]);
+
+    let initialized =
+        lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"]);
+    assert!(initialized.status.success());
+
+    let first = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "worktree",
+            "create",
+            "--task",
+            "Add User Roles",
+            "--agent",
+            "codex",
+        ],
+    );
+    let first_document: Value =
+        serde_json::from_slice(&first.stdout).expect("stdout should be JSON");
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let second = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "worktree",
+            "create",
+            "--task",
+            "Add Audit Search",
+            "--agent",
+            "codex",
+        ],
+    );
+    let second_document: Value =
+        serde_json::from_slice(&second.stdout).expect("stdout should be JSON");
+    assert!(second.status.success());
+
+    let first_path = Path::new(
+        first_document["data"]["path"]
+            .as_str()
+            .expect("worktree path should be a string"),
+    );
+    let second_path = Path::new(
+        second_document["data"]["path"]
+            .as_str()
+            .expect("worktree path should be a string"),
+    );
+    assert_ne!(first_path, second_path);
+    assert_ne!(
+        first_document["data"]["branch"],
+        second_document["data"]["branch"]
+    );
+    assert_eq!(git_stdout(first_path, &["rev-parse", "HEAD"]), target_sha);
+    assert_eq!(git_stdout(second_path, &["rev-parse", "HEAD"]), target_sha);
+    assert_eq!(git_stdout(&repository, &["rev-parse", "dev"]), target_sha);
+    assert_eq!(git_stdout(&repository, &["status", "--porcelain"]), "");
+}
+
+fn git_stdout(directory: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .args(args)
+        .output()
+        .expect("git should start");
+    assert!(output.status.success(), "git command failed: {args:?}");
+    String::from_utf8(output.stdout)
+        .expect("git output should be UTF-8")
+        .trim()
+        .to_owned()
+}
+
+#[test]
 fn json_mode_maps_argument_errors_to_exit_code_two() {
     let output = lprm(&["--json", "worktree", "status"]);
     let document: Value = serde_json::from_slice(&output.stdout).expect("stdout should be JSON");

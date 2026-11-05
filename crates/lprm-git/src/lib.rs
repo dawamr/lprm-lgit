@@ -179,6 +179,52 @@ impl Git {
         Ok(object_id)
     }
 
+    /// Creates a linked worktree and new branch at an exact commit object ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Git precondition error for invalid names, existing paths, or failed Git creation.
+    pub fn create_linked_worktree(
+        &self,
+        repository: &Path,
+        branch: &str,
+        worktree_path: &Path,
+        start_point: &str,
+    ) -> Result<(), LprmError> {
+        if worktree_path.exists() {
+            return Err(LprmError::git_precondition(format!(
+                "Worktree path already exists: {}",
+                worktree_path.display()
+            )));
+        }
+        let valid = self.run(repository, &["check-ref-format", "--branch", branch])?;
+        if !valid.status.success() {
+            return Err(LprmError::git_precondition(
+                "Generated worktree branch is invalid",
+            ));
+        }
+        if !is_object_id(start_point) {
+            return Err(LprmError::git_precondition(
+                "Worktree start point is not a full commit object ID",
+            ));
+        }
+
+        let output = Command::new(&self.executable)
+            .arg("-C")
+            .arg(repository)
+            .args(["worktree", "add", "-b", branch])
+            .arg(worktree_path)
+            .arg(start_point)
+            .output()
+            .map_err(|_| LprmError::git_precondition("Git executable is unavailable"))?;
+        if !output.status.success() {
+            return Err(LprmError::git_precondition(
+                "Git could not create the linked worktree",
+            ));
+        }
+        Ok(())
+    }
+
     fn required_path(
         &self,
         path: &Path,

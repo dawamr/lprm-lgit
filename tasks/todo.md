@@ -59,10 +59,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T05: Create isolated worktrees
 
 **Acceptance criteria:**
-- [ ] A unique branch and linked worktree are created from the exact current target SHA without modifying the target checkout.
+- [x] A unique branch and linked worktree are created from the exact current target SHA without modifying the target checkout.
 
 **Verification:**
-- [ ] Temporary-repository creation tests assert branch base and distinct paths.
+- [x] Temporary-repository creation tests assert branch base and distinct paths.
 
 **Dependencies:** T03, T04, T09
 

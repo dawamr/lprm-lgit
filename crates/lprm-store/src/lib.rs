@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lprm_core::LprmError;
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: i64 = 1;
@@ -283,6 +283,49 @@ impl Store {
                 (repository_id, common_git_dir, target_branch, config_hash),
             )
             .map_err(|error| persistence_error("register repository state", error))?;
+        Ok(())
+    }
+
+    /// Returns the target branch registered during `lprm init`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when SQLite cannot query repository state.
+    pub fn repository_target(&self, repository_id: &str) -> Result<Option<String>, LprmError> {
+        self.connection
+            .query_row(
+                "SELECT target_branch FROM repositories WHERE id = ?1",
+                [repository_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| persistence_error("read repository state", error))
+    }
+
+    /// Registers a linked worktree after Git creation succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error for non-UTF-8 paths or rejected SQLite constraints.
+    pub fn register_worktree(
+        &self,
+        id: &str,
+        repository_id: &str,
+        branch: &str,
+        absolute_path: &Path,
+        owner_agent: Option<&str>,
+    ) -> Result<(), LprmError> {
+        let absolute_path = absolute_path
+            .to_str()
+            .ok_or_else(|| LprmError::internal("The worktree path is not valid UTF-8"))?;
+        self.connection
+            .execute(
+                "INSERT INTO worktrees(\
+                    id, repository_id, branch, absolute_path, owner_agent, created_at\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                (id, repository_id, branch, absolute_path, owner_agent),
+            )
+            .map_err(|error| persistence_error("register managed worktree", error))?;
         Ok(())
     }
 
