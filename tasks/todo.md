@@ -101,10 +101,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T09: Add SQLite schema and migrations
 
 **Acceptance criteria:**
-- [ ] Versioned migrations create all PRD entities with foreign keys, uniqueness, WAL, and busy timeout.
+- [x] Versioned migrations create all PRD entities with foreign keys, uniqueness, WAL, and busy timeout.
 
 **Verification:**
-- [ ] Fresh migration, reopen, transaction rollback, and integrity tests pass.
+- [x] Fresh migration, reopen, transaction rollback, and integrity tests pass.
 
 **Dependencies:** T01, ADR
 
