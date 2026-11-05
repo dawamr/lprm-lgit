@@ -8,6 +8,7 @@ use std::time::Duration;
 use lprm_core::{LprmError, PullRequestStatus};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const SCHEMA_VERSION: i64 = 1;
@@ -178,6 +179,19 @@ pub struct NewPullRequest {
     pub target_sha: String,
     pub policy_hash: String,
     pub check_config_hash: String,
+    pub audit_id: String,
+    pub actor: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransitionEvidence {
+    pub audit_id: String,
+    pub actor: String,
+    pub reason: String,
+    pub revision_id: String,
+    pub source_sha: String,
+    pub target_sha: String,
+    pub policy_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -205,6 +219,16 @@ pub struct PullRequestRecord {
     pub updated_at: String,
     pub merged_at: Option<String>,
     pub revisions: Vec<PullRequestRevisionRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AuditEventRecord {
+    pub id: String,
+    pub pr_id: Option<String>,
+    pub event_type: String,
+    pub actor: String,
+    pub payload: Value,
+    pub created_at: String,
 }
 
 impl StateLayout {
@@ -522,6 +546,33 @@ impl Store {
                 ),
             )
             .map_err(|error| persistence_error("create pull request revision", error))?;
+        let audit_payload = json!({
+            "reason": "pull request created",
+            "from": null,
+            "to": PullRequestStatus::Draft.as_str(),
+            "revision_id": request.revision_id,
+            "source_sha": request.source_sha,
+            "target_sha": request.target_sha,
+            "policy_hash": request.policy_hash,
+            "check_config_hash": request.check_config_hash,
+        });
+        transaction
+            .execute(
+                "INSERT INTO audit_events(\
+                    id, repository_id, pr_id, event_type, actor, payload_json, created_at\
+                 ) VALUES (\
+                    ?1, ?2, ?3, 'pr_created', ?4, ?5, \
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+                 )",
+                (
+                    &request.audit_id,
+                    &request.repository_id,
+                    &request.id,
+                    &request.actor,
+                    audit_payload.to_string(),
+                ),
+            )
+            .map_err(|error| persistence_error("record pull request creation audit", error))?;
         transaction
             .commit()
             .map_err(|error| persistence_error("commit pull request transaction", error))?;
@@ -654,15 +705,73 @@ impl Store {
         &mut self,
         repository_id: &str,
         pull_request_id: &str,
+        evidence: &TransitionEvidence,
     ) -> Result<PullRequestRecord, LprmError> {
-        let current = self
-            .pull_request(repository_id, pull_request_id)?
-            .ok_or_else(|| LprmError::invalid_argument("Unknown pull request ID"))?;
-        let next = current.status.transition_to(PullRequestStatus::Closed)?;
+        self.transition_pull_request(
+            repository_id,
+            pull_request_id,
+            PullRequestStatus::Closed,
+            evidence,
+        )
+    }
+
+    /// Changes status and records exact revision evidence in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale-revision error when evidence differs from the latest immutable revision, a
+    /// validation error for an illegal state change, or an internal error on persistence failure.
+    pub fn transition_pull_request(
+        &mut self,
+        repository_id: &str,
+        pull_request_id: &str,
+        next: PullRequestStatus,
+        evidence: &TransitionEvidence,
+    ) -> Result<PullRequestRecord, LprmError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| persistence_error("start pull request close transaction", error))?;
+            .map_err(|error| persistence_error("start pull request transition", error))?;
+        let current_status = transaction
+            .query_row(
+                "SELECT status FROM pull_requests WHERE repository_id = ?1 AND id = ?2",
+                (repository_id, pull_request_id),
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| persistence_error("read pull request transition state", error))?
+            .ok_or_else(|| LprmError::invalid_argument("Unknown pull request ID"))?;
+        let current = parse_pull_request_status(&current_status)?;
+        current.transition_to(next)?;
+        let revision = transaction
+            .query_row(
+                "SELECT id, source_sha, target_sha, policy_hash \
+                 FROM pr_revisions WHERE pr_id = ?1 ORDER BY revision_number DESC LIMIT 1",
+                [pull_request_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| persistence_error("read pull request transition evidence", error))?
+            .ok_or_else(|| LprmError::internal("Pull request has no revision history"))?;
+        if revision
+            != (
+                evidence.revision_id.clone(),
+                evidence.source_sha.clone(),
+                evidence.target_sha.clone(),
+                evidence.policy_hash.clone(),
+            )
+        {
+            return Err(LprmError::stale_revision(
+                "Pull request transition evidence is stale",
+            ));
+        }
         let changed = transaction
             .execute(
                 "UPDATE pull_requests \
@@ -672,20 +781,94 @@ impl Store {
                     next.as_str(),
                     repository_id,
                     pull_request_id,
-                    current.status.as_str(),
+                    current.as_str(),
                 ),
             )
-            .map_err(|error| persistence_error("close pull request", error))?;
+            .map_err(|error| persistence_error("transition pull request", error))?;
         if changed != 1 {
             return Err(LprmError::internal(
                 "Pull request status changed concurrently",
             ));
         }
+        let payload = json!({
+            "reason": evidence.reason,
+            "from": current.as_str(),
+            "to": next.as_str(),
+            "revision_id": evidence.revision_id,
+            "source_sha": evidence.source_sha,
+            "target_sha": evidence.target_sha,
+            "policy_hash": evidence.policy_hash,
+        });
+        transaction
+            .execute(
+                "INSERT INTO audit_events(\
+                    id, repository_id, pr_id, event_type, actor, payload_json, created_at\
+                 ) VALUES (\
+                    ?1, ?2, ?3, 'pr_status_transition', ?4, ?5, \
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+                 )",
+                (
+                    &evidence.audit_id,
+                    repository_id,
+                    pull_request_id,
+                    &evidence.actor,
+                    payload.to_string(),
+                ),
+            )
+            .map_err(|error| persistence_error("record pull request transition audit", error))?;
         transaction
             .commit()
-            .map_err(|error| persistence_error("commit pull request close", error))?;
+            .map_err(|error| persistence_error("commit pull request transition", error))?;
         self.pull_request(repository_id, pull_request_id)?
-            .ok_or_else(|| LprmError::internal("Closed pull request could not be read"))
+            .ok_or_else(|| LprmError::internal("Transitioned pull request could not be read"))
+    }
+
+    /// Lists audit events in durable chronological order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when SQLite cannot query or decode an event payload.
+    pub fn audit_events(
+        &self,
+        repository_id: &str,
+        pull_request_id: Option<&str>,
+    ) -> Result<Vec<AuditEventRecord>, LprmError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, pr_id, event_type, actor, payload_json, created_at \
+                 FROM audit_events \
+                 WHERE repository_id = ?1 AND (?2 IS NULL OR pr_id = ?2) \
+                 ORDER BY created_at, id",
+            )
+            .map_err(|error| persistence_error("prepare audit event query", error))?;
+        let rows = statement
+            .query_map((repository_id, pull_request_id), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|error| persistence_error("query audit events", error))?;
+        rows.map(|row| {
+            let (id, pr_id, event_type, actor, payload, created_at) =
+                row.map_err(|error| persistence_error("decode audit event", error))?;
+            let payload = serde_json::from_str(&payload)
+                .map_err(|error| persistence_error("decode audit event payload", error))?;
+            Ok(AuditEventRecord {
+                id,
+                pr_id,
+                event_type,
+                actor,
+                payload,
+                created_at,
+            })
+        })
+        .collect()
     }
 
     fn pull_request_revisions(

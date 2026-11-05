@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use lprm_core::PullRequestStatus;
-use lprm_store::{NewPullRequest, Store};
+use lprm_core::{ErrorCode, PullRequestStatus};
+use lprm_store::{NewPullRequest, Store, TransitionEvidence};
 
 fn initialized_store() -> Store {
     let store = Store::open_in_memory().expect("memory database should migrate");
@@ -34,6 +34,8 @@ fn new_pull_request() -> NewPullRequest {
         target_sha: "0000000000000000000000000000000000000000".to_owned(),
         policy_hash: "policy".to_owned(),
         check_config_hash: "checks".to_owned(),
+        audit_id: "audit-1".to_owned(),
+        actor: "codex".to_owned(),
     }
 }
 
@@ -91,11 +93,91 @@ fn close_uses_state_guard_and_preserves_revision_history() {
         .create_pull_request(&new_pull_request())
         .expect("pull request should be created");
 
+    let evidence = TransitionEvidence {
+        audit_id: "audit-2".to_owned(),
+        actor: "operator".to_owned(),
+        reason: "close".to_owned(),
+        revision_id: "revision-1".to_owned(),
+        source_sha: "1111111111111111111111111111111111111111".to_owned(),
+        target_sha: "0000000000000000000000000000000000000000".to_owned(),
+        policy_hash: "policy".to_owned(),
+    };
     let closed = store
-        .close_pull_request("repo-1", "pr-1")
+        .close_pull_request("repo-1", "pr-1", &evidence)
         .expect("draft pull request should close");
 
     assert_eq!(closed.status, PullRequestStatus::Closed);
     assert_eq!(closed.revisions.len(), 1);
-    assert!(store.close_pull_request("repo-1", "pr-1").is_err());
+    assert!(
+        store
+            .close_pull_request("repo-1", "pr-1", &evidence)
+            .is_err()
+    );
+}
+
+#[test]
+fn transition_audit_is_ordered_and_rolls_back_on_stale_evidence() {
+    let mut store = initialized_store();
+    store
+        .create_pull_request(&new_pull_request())
+        .expect("pull request should be created");
+    let stale = TransitionEvidence {
+        audit_id: "audit-2".to_owned(),
+        actor: "operator".to_owned(),
+        reason: "close stale request".to_owned(),
+        revision_id: "revision-1".to_owned(),
+        source_sha: "2222222222222222222222222222222222222222".to_owned(),
+        target_sha: "0000000000000000000000000000000000000000".to_owned(),
+        policy_hash: "policy".to_owned(),
+    };
+
+    let stale_error = store
+        .transition_pull_request("repo-1", "pr-1", PullRequestStatus::Closed, &stale)
+        .expect_err("stale evidence must fail");
+    assert_eq!(stale_error.code, ErrorCode::StaleRevision);
+    assert_eq!(
+        store
+            .pull_request("repo-1", "pr-1")
+            .expect("PR should query")
+            .expect("PR should exist")
+            .status,
+        PullRequestStatus::Draft
+    );
+    assert_eq!(
+        store
+            .audit_events("repo-1", Some("pr-1"))
+            .expect("audit should query")
+            .len(),
+        1
+    );
+
+    let current = TransitionEvidence {
+        source_sha: "1111111111111111111111111111111111111111".to_owned(),
+        ..stale
+    };
+    store
+        .transition_pull_request("repo-1", "pr-1", PullRequestStatus::Closed, &current)
+        .expect("current evidence should transition");
+    let events = store
+        .audit_events("repo-1", Some("pr-1"))
+        .expect("audit should query");
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event_type, "pr_created");
+    assert_eq!(events[1].event_type, "pr_status_transition");
+    assert_eq!(events[1].actor, "operator");
+    assert_eq!(events[1].payload["reason"], "close stale request");
+    assert_eq!(events[1].payload["from"], "draft");
+    assert_eq!(events[1].payload["to"], "closed");
+    assert_eq!(events[1].payload["revision_id"], "revision-1");
+    assert_eq!(
+        events[1].payload["source_sha"],
+        "1111111111111111111111111111111111111111"
+    );
+    assert_eq!(
+        events[1].payload["target_sha"],
+        "0000000000000000000000000000000000000000"
+    );
+    assert_eq!(events[1].payload["policy_hash"], "policy");
+    assert_ne!(events[1].created_at, "");
 }

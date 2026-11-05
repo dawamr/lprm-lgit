@@ -131,10 +131,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T12: Persist audit and evidence fingerprints
 
 **Acceptance criteria:**
-- [ ] Every state transition records actor, time, reason, exact SHAs, revision, and policy fingerprint transactionally.
+- [x] Every state transition records actor, time, reason, exact SHAs, revision, and policy fingerprint transactionally.
 
 **Verification:**
-- [ ] Audit ordering and transaction rollback tests pass.
+- [x] Audit ordering and transaction rollback tests pass.
 
 **Dependencies:** T09, T11
 

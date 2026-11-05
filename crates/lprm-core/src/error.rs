@@ -82,6 +82,15 @@ impl LprmError {
         )
     }
 
+    pub fn stale_revision(message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorCode::StaleRevision,
+            message,
+            Value::Object(Map::default()),
+            true,
+        )
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(
             ErrorCode::Internal,

@@ -329,8 +329,9 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             PrCommand::Close(close) => close_pull_request(close),
             _ => Err(LprmError::internal("PR operation is not implemented yet")),
         },
+        Command::Audit(arguments) => show_audit_events(&arguments.id),
         Command::Recover(_) => recover_worktree_orphans(),
-        _ => Err(LprmError::internal(format!(
+        Command::Queue(_) => Err(LprmError::internal(format!(
             "{} is not implemented yet",
             cli.command_name()
         ))),
@@ -412,6 +413,10 @@ fn create_pull_request(arguments: &PrCreateArgs) -> Result<Value, LprmError> {
         target_sha,
         policy_hash: fingerprint.clone(),
         check_config_hash: fingerprint,
+        audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+        actor: source_worktree
+            .owner_agent
+            .unwrap_or_else(|| "local-operator".to_owned()),
     };
     let record = store.create_pull_request(&request)?;
     serde_json::to_value(record)
@@ -473,9 +478,53 @@ fn diff_pull_request(arguments: &PrDiffArgs) -> Result<Value, LprmError> {
 
 fn close_pull_request(arguments: &ReasonArgs) -> Result<Value, LprmError> {
     let (mut store, layout) = open_current_store()?;
-    let record = store.close_pull_request(layout.repository_id(), &arguments.id)?;
+    let current = store
+        .pull_request(layout.repository_id(), &arguments.id)?
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown pull request ID {:?}", arguments.id))
+        })?;
+    let revision = current
+        .revisions
+        .last()
+        .ok_or_else(|| LprmError::internal("Pull request has no revision history"))?;
+    let actor = if let Some(worktree_id) = current.worktree_id.as_deref() {
+        store
+            .worktree(layout.repository_id(), worktree_id)?
+            .and_then(|worktree| worktree.owner_agent)
+            .unwrap_or_else(|| "local-operator".to_owned())
+    } else {
+        "local-operator".to_owned()
+    };
+    let evidence = lprm_store::TransitionEvidence {
+        audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+        actor,
+        reason: arguments
+            .reason
+            .clone()
+            .unwrap_or_else(|| "closed by operator".to_owned()),
+        revision_id: revision.id.clone(),
+        source_sha: revision.source_sha.clone(),
+        target_sha: revision.target_sha.clone(),
+        policy_hash: revision.policy_hash.clone(),
+    };
+    let record = store.close_pull_request(layout.repository_id(), &arguments.id, &evidence)?;
     serde_json::to_value(record)
         .map_err(|_| LprmError::internal("Pull request serialization failed"))
+}
+
+fn show_audit_events(pull_request_id: &str) -> Result<Value, LprmError> {
+    let (store, layout) = open_current_store()?;
+    if store
+        .pull_request(layout.repository_id(), pull_request_id)?
+        .is_none()
+    {
+        return Err(LprmError::invalid_argument(format!(
+            "Unknown pull request ID {pull_request_id:?}"
+        )));
+    }
+    let events = store.audit_events(layout.repository_id(), Some(pull_request_id))?;
+    serde_json::to_value(events)
+        .map_err(|_| LprmError::internal("Audit event serialization failed"))
 }
 
 fn parse_pull_request_status(value: &str) -> Result<lprm_core::PullRequestStatus, LprmError> {

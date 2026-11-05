@@ -580,7 +580,22 @@ fn pull_request_lifecycle_persists_and_uses_the_exact_revision() {
     assert_eq!(stat_document["data"]["files"][0]["path"], "feature.txt");
     assert_eq!(stat_document["data"]["patch"], Value::Null);
 
-    let closed = lprm_in_with_state(&repository, &state, &["--json", "pr", "close", pr_id]);
+    assert_close_and_audit(&repository, &state, pr_id, &source_sha);
+}
+
+fn assert_close_and_audit(repository: &Path, state: &Path, pr_id: &str, source_sha: &str) {
+    let closed = lprm_in_with_state(
+        repository,
+        state,
+        &[
+            "--json",
+            "pr",
+            "close",
+            pr_id,
+            "--reason",
+            "superseded locally",
+        ],
+    );
     let closed_document: Value =
         serde_json::from_slice(&closed.stdout).expect("stdout should be JSON");
     assert_eq!(closed_document["data"]["status"], "closed");
@@ -590,6 +605,17 @@ fn pull_request_lifecycle_persists_and_uses_the_exact_revision() {
             .map(Vec::len),
         Some(1)
     );
+
+    let audit = lprm_in_with_state(repository, state, &["--json", "audit", pr_id]);
+    let document: Value = serde_json::from_slice(&audit.stdout).expect("stdout should be JSON");
+    assert_eq!(document["data"].as_array().map(Vec::len), Some(2));
+    assert_eq!(document["data"][0]["event_type"], "pr_created");
+    assert_eq!(document["data"][1]["event_type"], "pr_status_transition");
+    assert_eq!(
+        document["data"][1]["payload"]["reason"],
+        "superseded locally"
+    );
+    assert_eq!(document["data"][1]["payload"]["source_sha"], source_sha);
 }
 
 fn setup_pr_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf, String) {
