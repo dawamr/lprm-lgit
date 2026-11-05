@@ -8,6 +8,10 @@ pub struct AgentIdentity(String);
 
 impl AgentIdentity {
     /// Validates an identity at the CLI boundary without silently normalizing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-argument error when the value is empty, ambiguous, or oversized.
     pub fn parse(value: &str) -> Result<Self, LprmError> {
         if value.is_empty() {
             return Err(LprmError::invalid_argument(
@@ -33,6 +37,10 @@ impl AgentIdentity {
 }
 
 /// Enforces that two policy roles are held by distinct, self-declared identities.
+///
+/// # Errors
+///
+/// Returns a validation error when both roles use the same identity.
 pub fn require_role_separation(
     contributor: &AgentIdentity,
     approver: &AgentIdentity,

@@ -89,7 +89,26 @@ fn p0_machine_workflow_reaches_one_verified_merge_without_prompts() {
     assert_eq!(run["data"]["attempts"][0]["attempt"]["state"], "succeeded");
     let shown = json_success(&lprm(&repository, &state, &["--json", "pr", "show", pr_id]));
     assert_eq!(shown["data"]["status"], "merged");
-    let audit = json_success(&lprm(&repository, &state, &["--json", "audit", pr_id]));
+    assert_audit_actors(&repository, &state, pr_id);
+
+    let target_after = git_stdout(&repository, &["rev-parse", "dev"]);
+    assert_eq!(
+        git_stdout(
+            &repository,
+            &["rev-list", "--parents", "-n", "1", &target_after]
+        )
+        .split_whitespace()
+        .collect::<Vec<_>>(),
+        [
+            target_after.as_str(),
+            target_before.as_str(),
+            source_sha.as_str()
+        ]
+    );
+}
+
+fn assert_audit_actors(repository: &Path, state: &Path, pr_id: &str) {
+    let audit = json_success(&lprm(repository, state, &["--json", "audit", pr_id]));
     let actors = audit["data"]
         .as_array()
         .unwrap()
@@ -106,21 +125,6 @@ fn p0_machine_workflow_reaches_one_verified_merge_without_prompts() {
             "coordinator",
             "merger",
             "merger"
-        ]
-    );
-
-    let target_after = git_stdout(&repository, &["rev-parse", "dev"]);
-    assert_eq!(
-        git_stdout(
-            &repository,
-            &["rev-list", "--parents", "-n", "1", &target_after]
-        )
-        .split_whitespace()
-        .collect::<Vec<_>>(),
-        [
-            target_after.as_str(),
-            target_before.as_str(),
-            source_sha.as_str()
         ]
     );
 }
