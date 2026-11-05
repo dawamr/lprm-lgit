@@ -79,10 +79,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T07: Clean up worktrees safely
 
 **Acceptance criteria:**
-- [ ] Cleanup defaults to dry run and refuses dirty, symlinked, outside-root, unrecognized, or uniquely committed worktrees.
+- [x] Cleanup defaults to dry run and refuses dirty, symlinked, outside-root, unrecognized, or uniquely committed worktrees.
 
 **Verification:**
-- [ ] Adversarial path and dirty-data tests pass without deleting fixtures.
+- [x] Adversarial path and dirty-data tests pass without deleting fixtures.
 
 **Dependencies:** T06
 

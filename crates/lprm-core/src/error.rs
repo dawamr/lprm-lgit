@@ -73,6 +73,15 @@ impl LprmError {
         )
     }
 
+    pub fn validation_failed(message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorCode::ValidationFailed,
+            message,
+            Value::Object(Map::default()),
+            false,
+        )
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(
             ErrorCode::Internal,

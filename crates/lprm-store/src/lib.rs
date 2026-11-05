@@ -398,6 +398,33 @@ impl Store {
             .map_err(|error| persistence_error("read managed worktree", error))
     }
 
+    /// Marks a successfully removed worktree as cleaned while preserving its audit record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when SQLite cannot update exactly one active record.
+    pub fn mark_worktree_cleaned(
+        &self,
+        repository_id: &str,
+        worktree_id: &str,
+    ) -> Result<(), LprmError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE worktrees \
+                 SET cleaned_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE repository_id = ?1 AND id = ?2 AND cleaned_at IS NULL",
+                (repository_id, worktree_id),
+            )
+            .map_err(|error| persistence_error("mark managed worktree cleaned", error))?;
+        if changed != 1 {
+            return Err(LprmError::internal(
+                "Managed worktree cleanup record was not active",
+            ));
+        }
+        Ok(())
+    }
+
     fn initialize(mut connection: Connection, file_backed: bool) -> Result<Self, LprmError> {
         connection
             .pragma_update(None, "foreign_keys", "ON")

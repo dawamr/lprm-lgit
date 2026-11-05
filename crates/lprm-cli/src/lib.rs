@@ -227,6 +227,16 @@ struct WorktreeStatusReport {
     dirty: Option<bool>,
 }
 
+#[derive(Debug, Serialize)]
+struct WorktreeCleanupReport {
+    id: String,
+    branch: String,
+    path: std::path::PathBuf,
+    dry_run: bool,
+    eligible: bool,
+    removed: bool,
+}
+
 pub fn run() -> i32 {
     run_from(std::env::args_os())
 }
@@ -294,15 +304,73 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             WorktreeCommand::Create(create) => create_worktree(create),
             WorktreeCommand::List => list_worktrees(),
             WorktreeCommand::Status(status) => show_worktree_status(&status.id),
-            WorktreeCommand::Cleanup(_) => Err(LprmError::internal(
-                "worktree cleanup is not implemented yet",
-            )),
+            WorktreeCommand::Cleanup(cleanup) => cleanup_worktree(cleanup, cli.yes),
         },
         _ => Err(LprmError::internal(format!(
             "{} is not implemented yet",
             cli.command_name()
         ))),
     }
+}
+
+fn cleanup_worktree(arguments: &WorktreeCleanupArgs, confirmed: bool) -> Result<Value, LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let repository = lprm_git::Git::default().discover(&current_directory)?;
+    let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
+    let (store, layout) = open_current_store()?;
+    let record = store
+        .worktree(layout.repository_id(), &arguments.id)?
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown worktree ID {:?}", arguments.id))
+        })?;
+
+    let configured_root = if config.repository.worktree_root.is_absolute() {
+        config.repository.worktree_root
+    } else {
+        repository
+            .worktree_root
+            .join(config.repository.worktree_root)
+    };
+    let canonical_path =
+        lprm_core::validate_managed_worktree_path(&configured_root, &record.absolute_path)?;
+    let git = lprm_git::Git::default();
+    let observation = git.observe_worktree(&canonical_path)?;
+    if !observation.present || observation.actual_branch.as_deref() != Some(record.branch.as_str())
+    {
+        return Err(LprmError::git_precondition(
+            "Registered worktree ownership does not match Git state",
+        ));
+    }
+    if observation.dirty != Some(false) {
+        return Err(LprmError::validation_failed(
+            "Refusing to clean up a dirty worktree",
+        ));
+    }
+    let target_branch = store
+        .repository_target(layout.repository_id())?
+        .ok_or_else(|| LprmError::git_precondition("Repository initialization is missing"))?;
+    let target_sha = git.resolve_local_branch(&repository.worktree_root, &target_branch)?;
+    if git.has_unique_commits(&repository.worktree_root, &target_sha, &record.branch)? {
+        return Err(LprmError::validation_failed(
+            "Refusing to clean up a worktree with commits not reachable from the target",
+        ));
+    }
+
+    let dry_run = arguments.dry_run || !confirmed;
+    if !dry_run {
+        git.remove_linked_worktree(&repository.worktree_root, &canonical_path)?;
+        store.mark_worktree_cleaned(layout.repository_id(), &record.id)?;
+    }
+    serde_json::to_value(WorktreeCleanupReport {
+        id: record.id,
+        branch: record.branch,
+        path: canonical_path,
+        dry_run,
+        eligible: true,
+        removed: !dry_run,
+    })
+    .map_err(|_| LprmError::internal("Worktree cleanup report serialization failed"))
 }
 
 fn list_worktrees() -> Result<Value, LprmError> {

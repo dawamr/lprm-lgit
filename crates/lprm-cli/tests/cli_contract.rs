@@ -288,6 +288,100 @@ fn worktree_create_builds_distinct_checkouts_from_the_exact_target() {
     );
 }
 
+#[test]
+fn worktree_cleanup_is_dry_run_by_default_and_refuses_data_loss() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    std::fs::create_dir(&repository).expect("repository directory should be created");
+    initialize_repository(&repository);
+    assert!(
+        lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"])
+            .status
+            .success()
+    );
+
+    let created = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "worktree", "create", "--task", "Cleanup fixture"],
+    );
+    let created_document: Value =
+        serde_json::from_slice(&created.stdout).expect("stdout should be JSON");
+    let id = created_document["data"]["id"]
+        .as_str()
+        .expect("worktree id should be a string");
+    let path = Path::new(
+        created_document["data"]["path"]
+            .as_str()
+            .expect("worktree path should be a string"),
+    );
+
+    let preview = lprm_in_with_state(&repository, &state, &["--json", "worktree", "cleanup", id]);
+    let preview_document: Value =
+        serde_json::from_slice(&preview.stdout).expect("stdout should be JSON");
+    assert!(preview.status.success());
+    assert_eq!(preview_document["data"]["dry_run"], true);
+    assert_eq!(preview_document["data"]["removed"], false);
+    assert!(path.exists());
+
+    std::fs::write(path.join("dirty.txt"), "dirty\n").expect("dirty fixture should be written");
+    let dirty = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "--yes", "worktree", "cleanup", id],
+    );
+    let dirty_document: Value =
+        serde_json::from_slice(&dirty.stdout).expect("stdout should be JSON");
+    assert_eq!(dirty.status.code(), Some(5));
+    assert_eq!(dirty_document["error"]["code"], "VALIDATION_FAILED");
+    assert!(path.exists());
+    std::fs::remove_file(path.join("dirty.txt")).expect("dirty fixture should be removed");
+
+    std::fs::write(path.join("unique.txt"), "unique\n").expect("unique fixture should be written");
+    run_git(path, &["add", "unique.txt"]);
+    run_git(path, &["commit", "--quiet", "-m", "unique work"]);
+    let unique = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "--yes", "worktree", "cleanup", id],
+    );
+    assert_eq!(unique.status.code(), Some(5));
+    assert!(path.exists());
+
+    let clean_created = lprm_in_with_state(
+        &repository,
+        &state,
+        &[
+            "--json",
+            "worktree",
+            "create",
+            "--task",
+            "Disposable fixture",
+        ],
+    );
+    let clean_document: Value =
+        serde_json::from_slice(&clean_created.stdout).expect("stdout should be JSON");
+    let clean_id = clean_document["data"]["id"]
+        .as_str()
+        .expect("worktree id should be a string");
+    let clean_path = Path::new(
+        clean_document["data"]["path"]
+            .as_str()
+            .expect("worktree path should be a string"),
+    );
+    let removed = lprm_in_with_state(
+        &repository,
+        &state,
+        &["--json", "--yes", "worktree", "cleanup", clean_id],
+    );
+    let removed_document: Value =
+        serde_json::from_slice(&removed.stdout).expect("stdout should be JSON");
+    assert!(removed.status.success());
+    assert_eq!(removed_document["data"]["removed"], true);
+    assert!(!clean_path.exists());
+}
+
 fn assert_dirty_and_missing_observations(
     repository: &Path,
     state: &Path,

@@ -288,6 +288,67 @@ impl Git {
         })
     }
 
+    /// Reports whether a managed branch contains commits not reachable from the target SHA.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Git precondition error when refs cannot be inspected safely.
+    pub fn has_unique_commits(
+        &self,
+        repository: &Path,
+        target_sha: &str,
+        branch: &str,
+    ) -> Result<bool, LprmError> {
+        if !is_object_id(target_sha) {
+            return Err(LprmError::git_precondition(
+                "Cleanup target is not a full commit object ID",
+            ));
+        }
+        let valid = self.run(repository, &["check-ref-format", "--branch", branch])?;
+        if !valid.status.success() {
+            return Err(LprmError::git_precondition(
+                "Registered worktree branch is invalid",
+            ));
+        }
+        let range = format!("{target_sha}..refs/heads/{branch}");
+        let output = self.run(repository, &["rev-list", "--count", &range])?;
+        if !output.status.success() {
+            return Err(LprmError::git_precondition(
+                "Git could not inspect unique worktree commits",
+            ));
+        }
+        let count = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| LprmError::git_precondition("Git returned an invalid commit count"))?;
+        Ok(count > 0)
+    }
+
+    /// Removes a clean linked worktree without force or branch deletion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Git precondition error when Git refuses or cannot perform the removal.
+    pub fn remove_linked_worktree(
+        &self,
+        repository: &Path,
+        worktree_path: &Path,
+    ) -> Result<(), LprmError> {
+        let output = Command::new(&self.executable)
+            .arg("-C")
+            .arg(repository)
+            .args(["worktree", "remove"])
+            .arg(worktree_path)
+            .output()
+            .map_err(|_| LprmError::git_precondition("Git executable is unavailable"))?;
+        if !output.status.success() {
+            return Err(LprmError::git_precondition(
+                "Git refused to remove the managed worktree",
+            ));
+        }
+        Ok(())
+    }
+
     fn required_path(
         &self,
         path: &Path,
