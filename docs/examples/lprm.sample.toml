@@ -1,0 +1,46 @@
+# Sample .lprm.toml. Every key shown here is optional; the values are the shipped defaults
+# unless a comment says otherwise. The file is trusted repository configuration: the check,
+# review, and event commands run with your privileges.
+schema_version = 1
+
+[repository]
+target_branch = "dev"
+# Relative paths resolve from the repository root; worktrees are created directly below it.
+worktree_root = "../.lprm-worktrees"
+require_clean_target = true
+
+[merge]
+strategy = "no-ff"
+serialize = true
+revalidate_on_target_change = true
+cleanup_after_merge = false
+allow_fast_forward = false
+
+[checks]
+timeout_seconds = 900
+required = ["format", "test"]
+
+# Commands are argument arrays executed directly, never through a shell.
+[checks.commands]
+format = ["cargo", "fmt", "--all", "--", "--check"]
+test = ["cargo", "test", "--workspace", "--locked"]
+
+[review]
+mode = "rules"                        # "rules" or "external"
+require_approval_for_risk = ["high", "critical"]
+# Used only when mode = "external": a reviewer reads one JSON request on stdin and prints one
+# JSON report on stdout, with a scrubbed environment and these limits.
+# command = ["/usr/local/bin/my-reviewer"]
+timeout_seconds = 60
+max_payload_bytes = 1048576
+
+[policy]
+protected_paths = ["migrations/**", ".github/**", "infra/**", "auth/**"]
+# Queue low-risk PRs automatically after `lprm pr check` passes. Default: none (opt in).
+auto_enqueue_risks = []
+
+# Optional one-way notifications. Off unless a command is set; never able to change decisions.
+[events]
+# command = ["/usr/local/bin/notify-agent"]
+timeout_seconds = 5
+max_payload_bytes = 65536

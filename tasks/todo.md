@@ -292,10 +292,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T32: Finish operator and agent documentation
 
 **Acceptance criteria:**
-- [ ] README, architecture, CLI contract, threat model, runbook, sample config, and agent examples match implemented behavior.
+- [x] README, architecture, CLI contract, threat model, runbook, sample config, and agent examples match implemented behavior.
 
 **Verification:**
-- [ ] Every documented command is exercised by a smoke script or test.
+- [x] Every documented command is exercised by a smoke script or test.
 
 **Dependencies:** T25, T29
 
@@ -344,10 +344,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T27: Document Hermes and Codex workflows
 
 **Acceptance criteria:**
-- [ ] Examples show isolated worktree creation through merge/recovery using only stable CLI commands.
+- [x] Examples show isolated worktree creation through merge/recovery using only stable CLI commands.
 
 **Verification:**
-- [ ] Example command sequences run against a temporary repository.
+- [x] Example command sequences run against a temporary repository.
 
 **Dependencies:** T25, T26, T32
 
