@@ -37,19 +37,6 @@ impl Cli {
     pub fn machine_output(&self) -> bool {
         self.json || self.output == Some(OutputFormat::Json)
     }
-
-    fn command_name(&self) -> &'static str {
-        match self.command {
-            Command::Init(_) => "init",
-            Command::Doctor => "doctor",
-            Command::Config(_) => "config",
-            Command::Worktree(_) => "worktree",
-            Command::Pr(_) => "pr",
-            Command::Queue(_) => "queue",
-            Command::Audit(_) => "audit",
-            Command::Recover(_) => "recover",
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -256,6 +243,13 @@ struct RecoveryReport {
     merge_attempts: Vec<coordinator::MergeRecoveryReport>,
 }
 
+#[derive(Debug, Serialize)]
+struct QueueRunReport {
+    mode: &'static str,
+    processed: usize,
+    attempts: Vec<coordinator::CoordinatorReport>,
+}
+
 pub fn run() -> i32 {
     run_from(std::env::args_os())
 }
@@ -335,11 +329,50 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
         },
         Command::Audit(arguments) => show_audit_events(&arguments.id),
         Command::Recover(arguments) => recover_repository(arguments),
-        Command::Queue(_) => Err(LprmError::internal(format!(
-            "{} is not implemented yet",
-            cli.command_name()
-        ))),
+        Command::Queue(arguments) => match &arguments.command {
+            QueueCommand::List => list_merge_queue(),
+            QueueCommand::Run(run) => run_merge_queue(run),
+        },
     }
+}
+
+fn list_merge_queue() -> Result<Value, LprmError> {
+    let (store, layout) = open_current_store()?;
+    let queue = store.list_merge_queue(layout.repository_id())?;
+    serde_json::to_value(queue).map_err(|_| LprmError::internal("Merge queue serialization failed"))
+}
+
+fn run_merge_queue(arguments: &QueueRunArgs) -> Result<Value, LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let repository = lprm_git::Git::default().discover(&current_directory)?;
+    let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
+    let (_, layout) = open_current_store()?;
+    let mode = if arguments.once { "once" } else { "all" };
+    let mut attempts = Vec::new();
+    loop {
+        let result = coordinator::run_once(&coordinator::CoordinatorOptions {
+            repository: &repository.worktree_root,
+            layout: &layout,
+            checks: &config.checks,
+            lock_timeout: Duration::from_secs(5),
+            max_output_bytes: 1024 * 1024,
+            actor: "lprm-queue",
+        })?;
+        let Some(attempt) = result else {
+            break;
+        };
+        attempts.push(attempt);
+        if arguments.once {
+            break;
+        }
+    }
+    serde_json::to_value(QueueRunReport {
+        mode,
+        processed: attempts.len(),
+        attempts,
+    })
+    .map_err(|_| LprmError::internal("Merge queue run serialization failed"))
 }
 
 fn create_pull_request(arguments: &PrCreateArgs) -> Result<Value, LprmError> {

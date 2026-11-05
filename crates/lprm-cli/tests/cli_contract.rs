@@ -180,6 +180,39 @@ fn init_rejects_a_missing_target_branch() {
 }
 
 #[test]
+fn queue_commands_have_stable_empty_machine_reports() {
+    let fixture = tempdir().expect("temporary directory should be created");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    std::fs::create_dir(&repository).unwrap();
+    initialize_repository(&repository);
+    assert!(
+        lprm_in_with_state(&repository, &state, &["--json", "init", "--target", "dev"])
+            .status
+            .success()
+    );
+
+    let listed = lprm_in_with_state(&repository, &state, &["--json", "queue", "list"]);
+    let listed_document: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert!(listed.status.success());
+    assert_eq!(listed_document["data"], serde_json::json!([]));
+
+    for (flag, mode) in [("--once", "once"), ("--all", "all")] {
+        let run = lprm_in_with_state(&repository, &state, &["--json", "queue", "run", flag]);
+        let document: Value = serde_json::from_slice(&run.stdout).unwrap();
+        assert!(
+            run.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            document["data"],
+            serde_json::json!({"mode": mode, "processed": 0, "attempts": []})
+        );
+    }
+}
+
+#[test]
 fn worktree_create_builds_distinct_checkouts_from_the_exact_target() {
     let fixture = tempdir().expect("temporary directory should be created");
     let repository = fixture.path().join("repository");
