@@ -6,8 +6,9 @@ use lprm_core::{ChecksConfig, LprmError};
 use lprm_git::{Git, GuardedMerge, MergeRecovery};
 use lprm_runner::{CheckRunner, CheckSuiteResult};
 use lprm_store::{
-    CandidateMergeEvidence, CompleteMergeAttempt, MergeAttemptRecord, RepositoryLock,
-    RequeueMergeAttempt, StaleQueueInvalidation, StartMergeAttempt, StateLayout, Store,
+    CandidateMergeEvidence, CompleteMergeAttempt, FailMergeAttempt, MergeAttemptRecord,
+    RepositoryLock, RequeueMergeAttempt, StaleQueueInvalidation, StartMergeAttempt, StateLayout,
+    Store,
 };
 use serde::Serialize;
 
@@ -274,9 +275,9 @@ fn run_active_attempt(
             reconcile(store, options.layout.repository_id(), &attempt.id, problem)
         })?;
     if !checks.passed {
-        return Err(reconcile(
+        return Err(fail_before_merge(
             store,
-            options.layout.repository_id(),
+            options,
             &attempt.id,
             LprmError::validation_failed("Integrated candidate failed required checks"),
         ));
@@ -333,6 +334,33 @@ fn run_active_attempt(
         attempt: completed,
         checks,
     })
+}
+
+/// The target was never touched, so a rejected candidate fails the PR instead of blocking the queue.
+fn fail_before_merge(
+    store: &mut Store,
+    options: &CoordinatorOptions<'_>,
+    attempt_id: &str,
+    problem: LprmError,
+) -> LprmError {
+    let code = match serde_json::to_value(problem.code) {
+        Ok(serde_json::Value::String(code)) => code,
+        _ => "INTERNAL".to_owned(),
+    };
+    let request = FailMergeAttempt {
+        attempt_id: attempt_id.to_owned(),
+        audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+        actor: options.actor.to_owned(),
+        error_code: code,
+        reason: problem.message.clone(),
+    };
+    match store.fail_merge_attempt(options.layout.repository_id(), &request) {
+        Ok(_) => problem,
+        Err(persistence) => LprmError::internal(format!(
+            "{}; additionally unable to fail the merge attempt: {}",
+            problem.message, persistence.message
+        )),
+    }
 }
 
 fn reconcile(

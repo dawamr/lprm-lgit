@@ -326,6 +326,15 @@ pub struct CompleteMergeAttempt {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailMergeAttempt {
+    pub attempt_id: String,
+    pub audit_id: String,
+    pub actor: String,
+    pub error_code: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequeueMergeAttempt {
     pub attempt_id: String,
     pub audit_id: String,
@@ -1778,6 +1787,85 @@ impl Store {
             .map_err(|error| persistence_error("commit merge recovery", error))?;
         self.merge_attempt_record(repository_id, &request.attempt_id)?
             .ok_or_else(|| LprmError::internal("Recovered merge attempt could not be read"))
+    }
+
+    /// Ends a pre-merge attempt whose disposable candidate was rejected.
+    ///
+    /// The target branch was never touched, so the attempt, queue entry, and PR (`merging` to
+    /// `failed`) are closed together and the repository is released for other PRs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error unless the attempt is still `preparing`, or an internal error
+    /// when persistence fails.
+    pub fn fail_merge_attempt(
+        &mut self,
+        repository_id: &str,
+        request: &FailMergeAttempt,
+    ) -> Result<MergeAttemptRecord, LprmError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| persistence_error("start failed attempt transaction", error))?;
+        let (queue_id, pr_id) = transaction
+            .query_row(
+                "SELECT q.id, q.pr_id FROM merge_attempts a \
+                 JOIN merge_queue q ON q.id = a.queue_id \
+                 WHERE a.repository_id = ?1 AND a.id = ?2 AND a.state = 'preparing'",
+                (repository_id, &request.attempt_id),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| persistence_error("read attempt to fail", error))?
+            .ok_or_else(|| {
+                LprmError::validation_failed("Merge attempt is not awaiting candidate validation")
+            })?;
+        PullRequestStatus::Merging.transition_to(PullRequestStatus::Failed)?;
+        let changed = [
+            transaction.execute(
+                "UPDATE merge_attempts SET state = 'failed', error_code = ?1, \
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE id = ?2 AND state = 'preparing'",
+                (&request.error_code, &request.attempt_id),
+            ),
+            transaction.execute(
+                "UPDATE merge_queue SET status = 'failed', \
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE id = ?1 AND status = 'started'",
+                [&queue_id],
+            ),
+            transaction.execute(
+                "UPDATE pull_requests SET status = 'failed', \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE id = ?1 AND status = 'merging'",
+                [&pr_id],
+            ),
+        ];
+        for result in changed {
+            let rows = result.map_err(|error| persistence_error("fail merge attempt", error))?;
+            if rows != 1 {
+                return Err(LprmError::internal(
+                    "Merge attempt changed concurrently while failing",
+                ));
+            }
+        }
+        let payload = json!({
+            "reason": request.reason,
+            "from": "merging",
+            "to": "failed",
+            "attempt_id": request.attempt_id,
+            "error_code": request.error_code,
+        });
+        insert_audit_event(
+            &transaction,
+            (&request.audit_id, repository_id, &pr_id),
+            ("merge_attempt_failed", &request.actor, &payload),
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| persistence_error("commit failed attempt", error))?;
+        self.merge_attempt_record(repository_id, &request.attempt_id)?
+            .ok_or_else(|| LprmError::internal("Failed merge attempt could not be read"))
     }
 
     /// Marks an active attempt as requiring Git/database reconciliation.

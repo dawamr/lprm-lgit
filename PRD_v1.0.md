@@ -119,6 +119,7 @@ Allowed main path: `draft -> ready -> checking -> approved -> queued -> merging 
 - `changes_requested|conflict|blocked|failed -> ready` after source updates, configuration repairs or explicit retry.
 - `approved|queued -> ready` when source SHA or target SHA changes, or required policy changed; stale checks and approvals are invalidated.
 - `draft|ready|changes_requested|conflict|blocked|failed -> closed` by authorized caller.
+- `merging -> failed` when the disposable integration candidate is rejected before the target ref is touched (ADR-style amendment made during implementation); the attempt closes as `failed` and the queue is not blocked.
 - `merging` is recovery-sensitive; on startup inspect Git refs and event journal before transitioning.
 - `merged` and `closed` are terminal for their PR ID; new changes need a new PR or new revision before merge, never mutate historical evidence.
 

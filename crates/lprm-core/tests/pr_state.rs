@@ -24,6 +24,7 @@ fn transition_matrix_covers_every_state_pair() {
         (Queued, Ready),
         (Queued, Merging),
         (Merging, Merged),
+        (Merging, Failed),
         (Conflict, Ready),
         (Conflict, Closed),
         (Blocked, Ready),

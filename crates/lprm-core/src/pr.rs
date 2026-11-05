@@ -77,7 +77,7 @@ impl PullRequestStatus {
                 )
                 | (Self::Approved, Self::Ready | Self::Queued)
                 | (Self::Queued, Self::Ready | Self::Merging)
-                | (Self::Merging, Self::Merged)
+                | (Self::Merging, Self::Merged | Self::Failed)
         )
     }
 
