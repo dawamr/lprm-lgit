@@ -10,8 +10,8 @@ mod review;
 mod worktree;
 
 pub use config::{
-    ChecksConfig, Config, MergeConfig, MergeStrategy, PolicyConfig, RepositoryConfig, ReviewConfig,
-    ReviewMode, RiskLevel,
+    ChecksConfig, Config, EventsConfig, MergeConfig, MergeStrategy, PolicyConfig, RepositoryConfig,
+    ReviewConfig, ReviewMode, RiskLevel,
 };
 pub use error::{ErrorCode, LprmError};
 pub use evidence::{AdmissionGates, EvidenceFreshness, FingerprintInput, RevisionFingerprint};

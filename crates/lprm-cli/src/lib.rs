@@ -1,5 +1,6 @@
 pub mod coordinator;
 
+mod events;
 mod review;
 
 use std::ffi::OsString;
@@ -305,7 +306,11 @@ where
 
     let machine_output = cli.machine_output();
     initialize_tracing(machine_output);
-    match execute(&cli) {
+    let outcome = execute(&cli);
+    if let Ok(actor) = caller_identity(&cli) {
+        events::notify(&cli.command, &actor, outcome.as_ref());
+    }
+    match outcome {
         Ok(data) => {
             emit_success(&data, machine_output);
             0

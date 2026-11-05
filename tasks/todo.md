@@ -354,10 +354,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T28: Emit optional agent events and callbacks
 
 **Acceptance criteria:**
-- [ ] Versioned events are opt-in, bounded, non-shell subprocess calls that cannot bypass coordinator gates.
+- [x] Versioned events are opt-in, bounded, non-shell subprocess calls that cannot bypass coordinator gates.
 
 **Verification:**
-- [ ] Delivery failure and malformed callback tests do not corrupt state.
+- [x] Delivery failure and malformed callback tests do not corrupt state.
 
 **Dependencies:** T25, T26
 

@@ -23,6 +23,8 @@ pub struct Config {
     pub review: ReviewConfig,
     #[serde(default)]
     pub policy: PolicyConfig,
+    #[serde(default)]
+    pub events: EventsConfig,
 }
 
 impl Default for Config {
@@ -34,6 +36,30 @@ impl Default for Config {
             checks: ChecksConfig::default(),
             review: ReviewConfig::default(),
             policy: PolicyConfig::default(),
+            events: EventsConfig::default(),
+        }
+    }
+}
+
+/// Opt-in notification hook. Events are advisory: they can never change coordinator decisions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventsConfig {
+    /// Argument-array command that receives one JSON event on stdin; empty disables events.
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default = "default_event_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default = "default_event_payload_bytes")]
+    pub max_payload_bytes: usize,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            command: Vec::new(),
+            timeout_seconds: default_event_timeout_seconds(),
+            max_payload_bytes: default_event_payload_bytes(),
         }
     }
 }
@@ -168,7 +194,23 @@ impl Config {
                 )));
             }
         }
-        self.validate_review()
+        self.validate_review()?;
+        self.validate_events()
+    }
+
+    fn validate_events(&self) -> Result<(), LprmError> {
+        let events = &self.events;
+        if events.command.iter().any(String::is_empty) {
+            return Err(LprmError::invalid_argument(
+                "events.command must contain non-empty arguments",
+            ));
+        }
+        if events.timeout_seconds == 0 || events.max_payload_bytes == 0 {
+            return Err(LprmError::invalid_argument(
+                "events.timeout_seconds and events.max_payload_bytes must be greater than zero",
+            ));
+        }
+        Ok(())
     }
 
     fn validate_review(&self) -> Result<(), LprmError> {
@@ -401,6 +443,14 @@ fn default_check_commands() -> BTreeMap<String, Vec<String>> {
                 .to_vec(),
         ),
     ])
+}
+
+const fn default_event_timeout_seconds() -> u64 {
+    5
+}
+
+const fn default_event_payload_bytes() -> usize {
+    64 * 1024
 }
 
 const fn default_review_timeout_seconds() -> u64 {
