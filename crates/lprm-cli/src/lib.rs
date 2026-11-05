@@ -250,6 +250,13 @@ struct QueueRunReport {
     attempts: Vec<coordinator::CoordinatorReport>,
 }
 
+#[derive(Debug, Serialize)]
+struct PullRequestCheckReport {
+    conflict_free: bool,
+    pull_request: lprm_store::PullRequestRecord,
+    suite: lprm_runner::CheckSuiteResult,
+}
+
 pub fn run() -> i32 {
     run_from(std::env::args_os())
 }
@@ -324,6 +331,9 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             PrCommand::List(list) => list_pull_requests(list),
             PrCommand::Show(show) => show_pull_request(&show.id),
             PrCommand::Diff(diff) => diff_pull_request(diff),
+            PrCommand::Ready(ready) => mark_pull_request_ready(&ready.id),
+            PrCommand::Check(check) => check_pull_request(&check.id),
+            PrCommand::Enqueue(enqueue) => enqueue_pull_request(&enqueue.id),
             PrCommand::Close(close) => close_pull_request(close),
             _ => Err(LprmError::internal("PR operation is not implemented yet")),
         },
@@ -333,6 +343,237 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             QueueCommand::List => list_merge_queue(),
             QueueCommand::Run(run) => run_merge_queue(run),
         },
+    }
+}
+
+fn mark_pull_request_ready(pull_request_id: &str) -> Result<Value, LprmError> {
+    let (mut store, layout) = open_current_store()?;
+    let current = store
+        .pull_request(layout.repository_id(), pull_request_id)?
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown pull request ID {pull_request_id:?}"))
+        })?;
+    let revision = current
+        .revisions
+        .last()
+        .ok_or_else(|| LprmError::internal("Pull request has no revision history"))?;
+    let record = store.transition_pull_request(
+        layout.repository_id(),
+        pull_request_id,
+        lprm_core::PullRequestStatus::Ready,
+        &lprm_store::TransitionEvidence {
+            audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+            actor: "local-operator".to_owned(),
+            reason: "marked ready for validation".to_owned(),
+            revision_id: revision.id.clone(),
+            source_sha: revision.source_sha.clone(),
+            target_sha: revision.target_sha.clone(),
+            policy_hash: revision.policy_hash.clone(),
+        },
+    )?;
+    serde_json::to_value(record)
+        .map_err(|_| LprmError::internal("Pull request serialization failed"))
+}
+
+fn check_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let git = lprm_git::Git::default();
+    let repository = git.discover(&current_directory)?;
+    let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
+    let (mut store, layout) = open_current_store()?;
+    let current = store
+        .pull_request(layout.repository_id(), pull_request_id)?
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown pull request ID {pull_request_id:?}"))
+        })?;
+    let revision = current
+        .revisions
+        .last()
+        .ok_or_else(|| LprmError::internal("Pull request has no revision history"))?;
+    let source_sha = git.resolve_local_branch(&repository.worktree_root, &current.source_branch)?;
+    let target_sha = git.resolve_local_branch(&repository.worktree_root, &current.target_branch)?;
+    let policy_hash = config.policy_fingerprint()?;
+    let check_config_hash = config.check_config_fingerprint()?;
+    if revision.source_sha != source_sha
+        || revision.target_sha != target_sha
+        || revision.policy_hash != policy_hash
+        || revision.check_config_hash != check_config_hash
+    {
+        return Err(LprmError::stale_revision(
+            "Pull request revision changed before checks",
+        ));
+    }
+    let source_worktree_id = current.worktree_id.as_deref().ok_or_else(|| {
+        LprmError::git_precondition("Pull request has no managed source worktree")
+    })?;
+    let source_worktree = store
+        .worktree(layout.repository_id(), source_worktree_id)?
+        .ok_or_else(|| LprmError::git_precondition("Source worktree registration is missing"))?;
+    let observation = git.observe_worktree(&source_worktree.absolute_path)?;
+    if observation.actual_branch.as_deref() != Some(current.source_branch.as_str())
+        || observation.head_sha.as_deref() != Some(source_sha.as_str())
+        || observation.dirty != Some(false)
+    {
+        return Err(LprmError::git_precondition(
+            "Source worktree must match the clean pull request revision",
+        ));
+    }
+    store.transition_pull_request(
+        layout.repository_id(),
+        pull_request_id,
+        lprm_core::PullRequestStatus::Checking,
+        &transition_evidence(revision, "required checks started"),
+    )?;
+    if git.merge_preflight(&repository.worktree_root, &target_sha, &source_sha)?
+        == lprm_git::MergePreflight::Conflict
+    {
+        store.transition_pull_request(
+            layout.repository_id(),
+            pull_request_id,
+            lprm_core::PullRequestStatus::Conflict,
+            &transition_evidence(revision, "merge conflict detected"),
+        )?;
+        return Err(LprmError::new(
+            lprm_core::ErrorCode::Conflict,
+            "Pull request conflicts with the target branch",
+            serde_json::json!({}),
+            false,
+        ));
+    }
+    let run_id = uuid::Uuid::now_v7().simple().to_string();
+    let suite = lprm_runner::CheckRunner::new(1024 * 1024)?.run_required(
+        &config.checks,
+        &source_worktree.absolute_path,
+        &layout.logs_dir().join(format!("check_{run_id}")),
+    )?;
+    let checks = check_run_evidence(&run_id, &suite);
+    let pull_request = store.record_check_suite(
+        layout.repository_id(),
+        pull_request_id,
+        &lprm_store::RecordCheckSuite {
+            audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+            actor: "local-operator".to_owned(),
+            reason: "required checks completed".to_owned(),
+            revision_id: revision.id.clone(),
+            source_sha,
+            target_sha,
+            policy_hash,
+            check_config_hash,
+            checks,
+        },
+    )?;
+    if !suite.passed {
+        return Err(LprmError::validation_failed(
+            "Pull request failed required checks",
+        ));
+    }
+    serde_json::to_value(PullRequestCheckReport {
+        conflict_free: true,
+        pull_request,
+        suite,
+    })
+    .map_err(|_| LprmError::internal("Pull request check serialization failed"))
+}
+
+fn persisted_check_status(status: lprm_runner::CheckStatus) -> lprm_store::CheckRunStatus {
+    match status {
+        lprm_runner::CheckStatus::Passed => lprm_store::CheckRunStatus::Passed,
+        lprm_runner::CheckStatus::Failed => lprm_store::CheckRunStatus::Failed,
+        lprm_runner::CheckStatus::TimedOut => lprm_store::CheckRunStatus::TimedOut,
+        lprm_runner::CheckStatus::MissingExecutable => {
+            lprm_store::CheckRunStatus::MissingExecutable
+        }
+    }
+}
+
+fn check_run_evidence(
+    run_id: &str,
+    suite: &lprm_runner::CheckSuiteResult,
+) -> Vec<lprm_store::CheckRunEvidence> {
+    suite
+        .checks
+        .iter()
+        .enumerate()
+        .map(|(index, check)| lprm_store::CheckRunEvidence {
+            id: format!("check_{run_id}_{index}"),
+            name: check.name.clone(),
+            status: persisted_check_status(check.result.status),
+            exit_code: check.result.exit_code,
+            duration_ms: check.result.duration_ms,
+            stdout_path: check.result.stdout_path.clone(),
+            stderr_path: check.result.stderr_path.clone(),
+        })
+        .collect()
+}
+
+fn enqueue_pull_request(pull_request_id: &str) -> Result<Value, LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let git = lprm_git::Git::default();
+    let repository = git.discover(&current_directory)?;
+    let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
+    let (mut store, layout) = open_current_store()?;
+    let current = store
+        .pull_request(layout.repository_id(), pull_request_id)?
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown pull request ID {pull_request_id:?}"))
+        })?;
+    let source_sha = git.resolve_local_branch(&repository.worktree_root, &current.source_branch)?;
+    let target_sha = git.resolve_local_branch(&repository.worktree_root, &current.target_branch)?;
+    let fingerprint = lprm_core::RevisionFingerprint {
+        source_sha,
+        target_sha,
+        policy_hash: config.policy_fingerprint()?,
+        check_config_hash: config.check_config_fingerprint()?,
+    };
+    if git.merge_preflight(
+        &repository.worktree_root,
+        &fingerprint.target_sha,
+        &fingerprint.source_sha,
+    )? == lprm_git::MergePreflight::Conflict
+    {
+        return Err(LprmError::new(
+            lprm_core::ErrorCode::Conflict,
+            "Pull request conflicts with the target branch",
+            serde_json::json!({}),
+            false,
+        ));
+    }
+    let queued = store.enqueue_pull_request(
+        layout.repository_id(),
+        pull_request_id,
+        &lprm_store::EnqueuePullRequest {
+            queue_id: format!("queue_{}", uuid::Uuid::now_v7().simple()),
+            audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+            actor: "local-operator".to_owned(),
+            reason: "current P0 validation gates passed".to_owned(),
+            priority: 0,
+            current_fingerprint: fingerprint,
+            gates: lprm_core::AdmissionGates {
+                conflict_free: true,
+                required_checks_passed: current.status == lprm_core::PullRequestStatus::Approved,
+                required_reviews_passed: true,
+                required_approvals_present: true,
+            },
+        },
+    )?;
+    serde_json::to_value(queued)
+        .map_err(|_| LprmError::internal("Merge queue serialization failed"))
+}
+
+fn transition_evidence(
+    revision: &lprm_store::PullRequestRevisionRecord,
+    reason: &str,
+) -> lprm_store::TransitionEvidence {
+    lprm_store::TransitionEvidence {
+        audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+        actor: "local-operator".to_owned(),
+        reason: reason.to_owned(),
+        revision_id: revision.id.clone(),
+        source_sha: revision.source_sha.clone(),
+        target_sha: revision.target_sha.clone(),
+        policy_hash: revision.policy_hash.clone(),
     }
 }
 
