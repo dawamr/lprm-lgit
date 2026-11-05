@@ -223,10 +223,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T25: Stabilize the machine contract
 
 **Acceptance criteria:**
-- [ ] Every P0 command supports deterministic JSON, stable errors, and zero prompts in machine mode.
+- [x] Every P0 command supports deterministic JSON, stable errors, and zero prompts in machine mode.
 
 **Verification:**
-- [ ] Golden JSON and exit-code tests cover success and each error class.
+- [x] Golden JSON and exit-code tests cover success and each error class.
 
 **Dependencies:** T02, T20
 
