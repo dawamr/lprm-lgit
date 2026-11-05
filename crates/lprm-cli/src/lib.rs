@@ -3,6 +3,7 @@ use std::io::{self, Write};
 
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use lprm_core::{Envelope, LprmError};
+use serde::Serialize;
 use serde_json::Value;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
@@ -224,10 +225,34 @@ where
         }
     };
 
-    initialize_tracing(cli.machine_output());
-    let problem = LprmError::internal(format!("{} is not implemented yet", cli.command_name()));
-    emit_error(&problem, cli.machine_output());
-    problem.exit_code()
+    let machine_output = cli.machine_output();
+    initialize_tracing(machine_output);
+    match execute(&cli) {
+        Ok(data) => {
+            emit_success(&data, machine_output);
+            0
+        }
+        Err(problem) => {
+            emit_error(&problem, machine_output);
+            problem.exit_code()
+        }
+    }
+}
+
+fn execute(cli: &Cli) -> Result<Value, LprmError> {
+    match cli.command {
+        Command::Doctor => {
+            let current_directory = std::env::current_dir()
+                .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+            let report = lprm_git::doctor(&current_directory)?;
+            serde_json::to_value(report)
+                .map_err(|_| LprmError::internal("Doctor report serialization failed"))
+        }
+        _ => Err(LprmError::internal(format!(
+            "{} is not implemented yet",
+            cli.command_name()
+        ))),
+    }
 }
 
 fn machine_output_requested(args: &[OsString]) -> bool {
@@ -253,6 +278,18 @@ fn initialize_tracing(json: bool) {
         let _ = subscriber.json().try_init();
     } else {
         let _ = subscriber.compact().try_init();
+    }
+}
+
+fn emit_success<T: Serialize>(data: &T, json: bool) {
+    let mut stdout = io::stdout().lock();
+    if json {
+        let envelope = Envelope::success(data);
+        if serde_json::to_writer(&mut stdout, &envelope).is_ok() {
+            let _ = writeln!(stdout);
+        }
+    } else if serde_json::to_writer_pretty(&mut stdout, data).is_ok() {
+        let _ = writeln!(stdout);
     }
 }
 

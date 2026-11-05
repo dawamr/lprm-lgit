@@ -64,6 +64,15 @@ impl LprmError {
         )
     }
 
+    pub fn git_precondition(message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorCode::GitPrecondition,
+            message,
+            Value::Object(Map::default()),
+            false,
+        )
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(
             ErrorCode::Internal,

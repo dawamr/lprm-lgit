@@ -39,10 +39,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T03: Discover repositories and implement doctor
 
 **Acceptance criteria:**
-- [ ] Repository identity, Git version/capability, permissions, and unsupported submodules are reported without requiring a remote.
+- [x] Repository identity, Git version/capability, permissions, and unsupported submodules are reported without requiring a remote.
 
 **Verification:**
-- [ ] Temporary-repository doctor tests pass for valid and invalid cases.
+- [x] Temporary-repository doctor tests pass for valid and invalid cases.
 
 **Dependencies:** T02
 
