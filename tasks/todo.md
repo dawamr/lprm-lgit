@@ -171,10 +171,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T16: Invalidate stale evidence
 
 **Acceptance criteria:**
-- [ ] Source, target, policy, or check-config changes invalidate prior checks, reviews, approvals, and queued admission.
+- [x] Source, target, policy, or check-config changes invalidate prior checks, reviews, approvals, and queued admission.
 
 **Verification:**
-- [ ] Each fingerprint input has an independent staleness test.
+- [x] Each fingerprint input has an independent staleness test.
 
 **Dependencies:** T12, T15
 

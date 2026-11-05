@@ -399,7 +399,8 @@ fn create_pull_request(arguments: &PrCreateArgs) -> Result<Value, LprmError> {
             })
         },
     )?;
-    let fingerprint = config.fingerprint()?;
+    let policy_hash = config.policy_fingerprint()?;
+    let check_config_hash = config.check_config_fingerprint()?;
     let request = lprm_store::NewPullRequest {
         id: format!("pr_{}", uuid::Uuid::now_v7().simple()),
         repository_id: layout.repository_id().to_owned(),
@@ -411,8 +412,8 @@ fn create_pull_request(arguments: &PrCreateArgs) -> Result<Value, LprmError> {
         revision_id: format!("revision_{}", uuid::Uuid::now_v7().simple()),
         source_sha,
         target_sha,
-        policy_hash: fingerprint.clone(),
-        check_config_hash: fingerprint,
+        policy_hash,
+        check_config_hash,
         audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
         actor: source_worktree
             .owner_agent

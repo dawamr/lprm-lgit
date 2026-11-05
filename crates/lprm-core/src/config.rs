@@ -46,9 +46,42 @@ impl Config {
     /// Returns an internal error if the validated config cannot be serialized.
     pub fn fingerprint(&self) -> Result<String, LprmError> {
         self.validate()?;
-        let encoded = serde_json::to_vec(self)
-            .map_err(|_| LprmError::internal("Config fingerprint serialization failed"))?;
-        Ok(hex::encode(Sha256::digest(encoded)))
+        hash_serializable(self, "Config fingerprint serialization failed")
+    }
+
+    /// Returns the policy fingerprint that governs review and merge admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if the validated policy inputs cannot be serialized.
+    pub fn policy_fingerprint(&self) -> Result<String, LprmError> {
+        self.validate()?;
+        hash_serializable(
+            &PolicyFingerprint {
+                schema_version: self.schema_version,
+                repository: &self.repository,
+                merge: &self.merge,
+                review: &self.review,
+                policy: &self.policy,
+            },
+            "Policy fingerprint serialization failed",
+        )
+    }
+
+    /// Returns the fingerprint for configured validation commands and their timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error if the validated check configuration cannot be serialized.
+    pub fn check_config_fingerprint(&self) -> Result<String, LprmError> {
+        self.validate()?;
+        hash_serializable(
+            &CheckConfigFingerprint {
+                schema_version: self.schema_version,
+                checks: &self.checks,
+            },
+            "Check configuration fingerprint serialization failed",
+        )
     }
 
     /// Parses and validates a schema-versioned TOML document.
@@ -138,6 +171,29 @@ impl Config {
 
         Ok(())
     }
+}
+
+#[derive(Serialize)]
+struct PolicyFingerprint<'a> {
+    schema_version: u32,
+    repository: &'a RepositoryConfig,
+    merge: &'a MergeConfig,
+    review: &'a ReviewConfig,
+    policy: &'a PolicyConfig,
+}
+
+#[derive(Serialize)]
+struct CheckConfigFingerprint<'a> {
+    schema_version: u32,
+    checks: &'a ChecksConfig,
+}
+
+fn hash_serializable(
+    value: &impl Serialize,
+    failure_message: &'static str,
+) -> Result<String, LprmError> {
+    let encoded = serde_json::to_vec(value).map_err(|_| LprmError::internal(failure_message))?;
+    Ok(hex::encode(Sha256::digest(encoded)))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
