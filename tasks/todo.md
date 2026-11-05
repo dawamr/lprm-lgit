@@ -161,10 +161,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T15: Run configured checks
 
 **Acceptance criteria:**
-- [ ] Argument-array commands run with timeout, bounded stdout/stderr files, stable statuses, and no shell interpolation.
+- [x] Argument-array commands run with timeout, bounded stdout/stderr files, stable statuses, and no shell interpolation.
 
 **Verification:**
-- [ ] Success, failure, timeout, missing executable, and hostile-argument tests pass.
+- [x] Success, failure, timeout, missing executable, and hostile-argument tests pass.
 
 **Dependencies:** T04, T09
 

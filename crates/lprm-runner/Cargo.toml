@@ -7,6 +7,13 @@ rust-version.workspace = true
 
 [dependencies]
 lprm-core = { path = "../lprm-core" }
+serde.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
