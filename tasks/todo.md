@@ -19,10 +19,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T01: Initialize the Rust workspace
 
 **Acceptance criteria:**
-- [ ] The five recommended crates compile in a workspace and `lprm --help` is runnable.
+- [x] The five recommended crates compile in a workspace and `lprm --help` is runnable.
 
 **Verification:**
-- [ ] `cargo check --workspace --locked`
+- [x] `cargo check --workspace --locked`
 
 **Dependencies:** ADR
 

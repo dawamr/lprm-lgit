@@ -1,0 +1,12 @@
+[package]
+name = "lprm-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lprm-core = { path = "../lprm-core" }
+
+[lints]
+workspace = true
