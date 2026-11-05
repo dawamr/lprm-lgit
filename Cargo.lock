@@ -390,6 +390,7 @@ dependencies = [
  "clap",
  "lprm-core",
  "lprm-git",
+ "lprm-runner",
  "lprm-store",
  "serde",
  "serde_json",

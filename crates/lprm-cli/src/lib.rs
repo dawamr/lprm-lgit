@@ -1,3 +1,5 @@
+pub mod coordinator;
+
 use std::ffi::OsString;
 use std::io::{self, Write};
 

@@ -1291,6 +1291,42 @@ impl Store {
             .ok_or_else(|| LprmError::internal("Completed merge attempt could not be read"))
     }
 
+    /// Marks an active attempt as requiring Git/database reconciliation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error if the attempt is not active, or an internal error when the
+    /// state update cannot be persisted.
+    pub fn mark_merge_attempt_reconciling(
+        &mut self,
+        repository_id: &str,
+        attempt_id: &str,
+        error_code: &str,
+    ) -> Result<MergeAttemptRecord, LprmError> {
+        if error_code.is_empty() {
+            return Err(LprmError::invalid_argument(
+                "Merge reconciliation error code must not be empty",
+            ));
+        }
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE merge_attempts \
+                 SET state = 'reconciling', error_code = ?1 \
+                 WHERE repository_id = ?2 AND id = ?3 \
+                   AND state IN ('preparing', 'testing', 'integrating', 'reconciling')",
+                (error_code, repository_id, attempt_id),
+            )
+            .map_err(|error| persistence_error("mark merge attempt reconciling", error))?;
+        if changed != 1 {
+            return Err(LprmError::validation_failed(
+                "Merge attempt is not active for reconciliation",
+            ));
+        }
+        self.merge_attempt_record(repository_id, attempt_id)?
+            .ok_or_else(|| LprmError::internal("Reconciling merge attempt could not be read"))
+    }
+
     /// Lists merge attempts for a repository in start order.
     ///
     /// # Errors

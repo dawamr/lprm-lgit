@@ -203,10 +203,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T19: Perform guarded no-ff integration
 
 **Acceptance criteria:**
-- [ ] The coordinator rechecks refs, merges the exact source, verifies parents/tree, and atomically records success without duplicate integration.
+- [x] The coordinator rechecks refs, merges the exact source, verifies parents/tree, and atomically records success without duplicate integration.
 
 **Verification:**
-- [ ] Sequential two-PR, target-race, hook-difference, and failed-merge tests pass.
+- [x] Sequential two-PR, target-race, hook-difference, and failed-merge tests pass.
 
 **Dependencies:** T18
 
