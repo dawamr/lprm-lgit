@@ -1,5 +1,7 @@
 pub mod coordinator;
 
+mod review;
+
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::time::Duration;
@@ -261,6 +263,15 @@ struct PullRequestCheckReport {
     conflict_free: bool,
     pull_request: lprm_store::PullRequestRecord,
     suite: lprm_runner::CheckSuiteResult,
+    /// Present only when the configured policy considers automatic queue admission.
+    auto_enqueue: Option<AutoEnqueueReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct AutoEnqueueReport {
+    risk: lprm_core::RiskLevel,
+    queued: bool,
+    detail: String,
 }
 
 pub fn run() -> i32 {
@@ -342,8 +353,9 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             PrCommand::Sync(sync) => sync_pull_request(&sync.id, &actor),
             PrCommand::Check(check) => check_pull_request(&check.id, &actor),
             PrCommand::Enqueue(enqueue) => enqueue_pull_request(&enqueue.id, &actor),
+            PrCommand::Review(review) => review::review_pull_request(&review.id, &actor),
+            PrCommand::Approve(approve) => review::approve_pull_request(approve, &actor),
             PrCommand::Close(close) => close_pull_request(close, &actor),
-            _ => Err(LprmError::internal("PR operation is not implemented yet")),
         },
         Command::Audit(arguments) => show_audit_events(&arguments.id),
         Command::Recover(arguments) => recover_repository(arguments, &actor),
@@ -562,12 +574,40 @@ fn check_pull_request(pull_request_id: &str, actor: &AgentIdentity) -> Result<Va
             "Pull request failed required checks",
         ));
     }
+    let auto_enqueue = auto_admission(pull_request_id, actor, &config);
     serde_json::to_value(PullRequestCheckReport {
         conflict_free: true,
         pull_request,
         suite,
+        auto_enqueue,
     })
     .map_err(|_| LprmError::internal("Pull request check serialization failed"))
+}
+
+/// Queues a freshly approved PR when its assessed risk is on the configured auto-admission list.
+fn auto_admission(
+    pull_request_id: &str,
+    actor: &AgentIdentity,
+    config: &lprm_core::Config,
+) -> Option<AutoEnqueueReport> {
+    if config.policy.auto_enqueue_risks.is_empty() {
+        return None;
+    }
+    let assessment = review::PolicyContext::load(pull_request_id)
+        .and_then(|context| context.assess())
+        .ok()?;
+    if !config.policy.auto_enqueue_risks.contains(&assessment.risk) {
+        return None;
+    }
+    let (queued, detail) = match enqueue_pull_request(pull_request_id, actor) {
+        Ok(_) => (true, "queued automatically".to_owned()),
+        Err(error) => (false, error.message),
+    };
+    Some(AutoEnqueueReport {
+        risk: assessment.risk,
+        queued,
+        detail,
+    })
 }
 
 fn persisted_check_status(status: lprm_runner::CheckStatus) -> lprm_store::CheckRunStatus {
@@ -602,50 +642,41 @@ fn check_run_evidence(
 }
 
 fn enqueue_pull_request(pull_request_id: &str, actor: &AgentIdentity) -> Result<Value, LprmError> {
-    let current_directory = std::env::current_dir()
-        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let mut context = review::PolicyContext::load(pull_request_id)?;
+    let assessment = context.assess()?;
+    if !assessment.blockers.is_empty() {
+        return Err(LprmError::validation_failed(format!(
+            "Queue admission blocked: {}",
+            assessment.blockers.join("; ")
+        )));
+    }
     let git = lprm_git::Git::default();
-    let repository = git.discover(&current_directory)?;
-    let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
-    let (mut store, layout) = open_current_store()?;
-    let current = store
-        .pull_request(layout.repository_id(), pull_request_id)?
-        .ok_or_else(|| {
-            LprmError::invalid_argument(format!("Unknown pull request ID {pull_request_id:?}"))
-        })?;
-    let source_sha = git.resolve_local_branch(&repository.worktree_root, &current.source_branch)?;
-    let target_sha = git.resolve_local_branch(&repository.worktree_root, &current.target_branch)?;
-    let fingerprint = lprm_core::RevisionFingerprint {
-        source_sha,
-        target_sha,
-        policy_hash: config.policy_fingerprint()?,
-        check_config_hash: config.check_config_fingerprint()?,
-    };
     if git.merge_preflight(
-        &repository.worktree_root,
-        &fingerprint.target_sha,
-        &fingerprint.source_sha,
+        &context.repository_root,
+        &context.fingerprint.target_sha,
+        &context.fingerprint.source_sha,
     )? == lprm_git::MergePreflight::Conflict
     {
         return Err(LprmError::conflict(
             "Pull request conflicts with the target branch",
         ));
     }
-    let queued = store.enqueue_pull_request(
-        layout.repository_id(),
+    let queued = context.store.enqueue_pull_request(
+        &context.repository_id,
         pull_request_id,
         &lprm_store::EnqueuePullRequest {
             queue_id: format!("queue_{}", uuid::Uuid::now_v7().simple()),
             audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
             actor: actor.as_str().to_owned(),
-            reason: "current P0 validation gates passed".to_owned(),
+            reason: format!("admission gates passed at {:?} risk", assessment.risk),
             priority: 0,
-            current_fingerprint: fingerprint,
+            current_fingerprint: context.fingerprint.clone(),
             gates: lprm_core::AdmissionGates {
                 conflict_free: true,
-                required_checks_passed: current.status == lprm_core::PullRequestStatus::Approved,
-                required_reviews_passed: true,
-                required_approvals_present: true,
+                required_checks_passed: context.record.status
+                    == lprm_core::PullRequestStatus::Approved,
+                required_reviews_passed: assessment.required_reviews_passed,
+                required_approvals_present: assessment.required_approvals_present,
             },
         },
     )?;

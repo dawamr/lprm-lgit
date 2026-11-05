@@ -26,6 +26,11 @@ impl Fixture {
 
     /// `check_array` is a TOML array literal holding the `gate` command and its arguments.
     pub fn with_check(check_array: &str) -> Self {
+        Self::with_options(check_array, "")
+    }
+
+    /// `extra_toml` is appended to `.lprm.toml`, e.g. `[review]` or `[policy]` sections.
+    pub fn with_options(check_array: &str, extra_toml: &str) -> Self {
         let temporary = tempdir().unwrap();
         let repository = temporary.path().join("repository");
         let state = temporary.path().join("state");
@@ -40,7 +45,7 @@ impl Fixture {
         fs::write(
             repository.join(".lprm.toml"),
             format!(
-                "schema_version = 1\n[checks]\ntimeout_seconds = 5\nrequired = [\"gate\"]\n[checks.commands]\ngate = {check_array}\n"
+                "schema_version = 1\n[checks]\ntimeout_seconds = 5\nrequired = [\"gate\"]\n[checks.commands]\ngate = {check_array}\n{extra_toml}\n"
             ),
         )
         .unwrap();
@@ -86,7 +91,9 @@ impl Fixture {
         let worktree = self.json_success(&["--json", "worktree", "create", "--task", file]);
         let path = PathBuf::from(worktree["data"]["path"].as_str().unwrap());
         let branch = worktree["data"]["branch"].as_str().unwrap();
-        fs::write(path.join(file), "content\n").unwrap();
+        let target = path.join(file);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, "content\n").unwrap();
         git(&path, &["add", file]);
         git(&path, &["commit", "-m", file]);
         let created =

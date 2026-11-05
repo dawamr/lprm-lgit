@@ -304,40 +304,40 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T21: Model review findings
 
 **Acceptance criteria:**
-- [ ] Versioned findings persist severity, location, code, message, suggestion, resolution, and verdict.
+- [x] Versioned findings persist severity, location, code, message, suggestion, resolution, and verdict.
 
 **Verification:**
-- [ ] Schema and serialization tests pass.
+- [x] Schema and serialization tests pass.
 
 **Dependencies:** T09, T12
 
 ### T22: Enforce protected-path risk and approvals
 
 **Acceptance criteria:**
-- [ ] Policy classifies changed paths and blocks unresolved high/critical risk without an eligible approval.
+- [x] Policy classifies changed paths and blocks unresolved high/critical risk without an eligible approval.
 
 **Verification:**
-- [ ] Glob, role separation, stale approval, and override-reason tests pass.
+- [x] Glob, role separation, stale approval, and override-reason tests pass.
 
 **Dependencies:** T13, T16, T21
 
 ### T23: Add an external reviewer adapter
 
 **Acceptance criteria:**
-- [ ] A subprocess receives/returns versioned JSON under time and size limits without shell or inherited secrets.
+- [x] A subprocess receives/returns versioned JSON under time and size limits without shell or inherited secrets.
 
 **Verification:**
-- [ ] Valid, malformed, oversized, failed, and timed-out adapter tests pass.
+- [x] Valid, malformed, oversized, failed, and timed-out adapter tests pass.
 
 **Dependencies:** T15, T21
 
 ### T24: Implement automatic queue admission policy
 
 **Acceptance criteria:**
-- [ ] Configured low-risk PRs can enqueue only after all deterministic and review gates are current.
+- [x] Configured low-risk PRs can enqueue only after all deterministic and review gates are current.
 
 **Verification:**
-- [ ] Admission matrix tests pass.
+- [x] Admission matrix tests pass.
 
 **Dependencies:** T16, T22, T23
 
