@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use lprm_core::{AdmissionGates, ErrorCode, PullRequestStatus, RevisionFingerprint};
 use lprm_store::{
     CandidateMergeEvidence, CompleteMergeAttempt, EnqueuePullRequest, MergeQueueRecord,
-    NewPullRequest, RepositoryLock, StartMergeAttempt, Store, TransitionEvidence,
+    NewPullRequest, RepositoryLock, RequeueMergeAttempt, StartMergeAttempt, Store,
+    TransitionEvidence,
 };
 use serde_json::Value;
 use tempfile::tempdir;
@@ -331,6 +332,85 @@ fn completion_rejects_mismatched_sha_evidence_without_mutation() {
             PullRequestStatus::Merging
         );
     }
+}
+
+#[test]
+fn recovery_requeue_atomically_restores_queue_and_pull_request() {
+    let mut store = started_store();
+
+    let recovered = store
+        .requeue_interrupted_merge(
+            "repo-1",
+            &RequeueMergeAttempt {
+                attempt_id: "attempt-1".to_owned(),
+                audit_id: "audit-requeue".to_owned(),
+                actor: "recovery".to_owned(),
+                target_before_sha: "0000000000000000000000000000000000000000".to_owned(),
+                source_sha: "1111111111111111111111111111111111111111".to_owned(),
+            },
+        )
+        .expect("an unintegrated attempt should requeue");
+
+    assert_eq!(recovered.state, "failed");
+    assert_eq!(
+        recovered.error_code.as_deref(),
+        Some("INTERRUPTED_RETRYABLE")
+    );
+    assert!(recovered.finished_at.is_some());
+    let queue = &store.list_merge_queue("repo-1").unwrap()[0];
+    assert_eq!(queue.status, "queued");
+    assert_eq!(queue.started_at, None);
+    assert_eq!(
+        store
+            .pull_request("repo-1", "pr-1")
+            .unwrap()
+            .unwrap()
+            .status,
+        PullRequestStatus::Queued
+    );
+    assert!(
+        store
+            .audit_events("repo-1", Some("pr-1"))
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == "merge_requeued_after_recovery")
+    );
+}
+
+#[test]
+fn recovery_completion_accepts_reconciling_attempt_with_exact_evidence() {
+    let mut store = started_store();
+    store
+        .record_candidate_ready(
+            "repo-1",
+            &CandidateMergeEvidence {
+                attempt_id: "attempt-1".to_owned(),
+                candidate_commit_sha: "2222222222222222222222222222222222222222".to_owned(),
+            },
+        )
+        .unwrap();
+    store
+        .mark_merge_attempt_reconciling("repo-1", "attempt-1", "INTERNAL")
+        .unwrap();
+
+    let completed = store
+        .complete_merge_attempt("repo-1", &completion())
+        .expect("exact Git evidence should complete reconciliation");
+
+    assert_eq!(completed.state, "succeeded");
+    assert_eq!(completed.error_code, None);
+    assert_eq!(
+        store.list_merge_queue("repo-1").unwrap()[0].status,
+        "completed"
+    );
+    assert_eq!(
+        store
+            .pull_request("repo-1", "pr-1")
+            .unwrap()
+            .unwrap()
+            .status,
+        PullRequestStatus::Merged
+    );
 }
 
 #[test]

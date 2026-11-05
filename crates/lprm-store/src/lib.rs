@@ -237,6 +237,15 @@ pub struct CompleteMergeAttempt {
     pub target_after_sha: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequeueMergeAttempt {
+    pub attempt_id: String,
+    pub audit_id: String,
+    pub actor: String,
+    pub target_before_sha: String,
+    pub source_sha: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PullRequestRevisionRecord {
     pub id: String,
@@ -1291,6 +1300,55 @@ impl Store {
             .ok_or_else(|| LprmError::internal("Completed merge attempt could not be read"))
     }
 
+    /// Atomically closes an unintegrated attempt and restores its queue entry for retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale-revision error when exact SHA evidence differs, a validation error when the
+    /// attempt is no longer active, or an internal error when the transaction cannot commit.
+    pub fn requeue_interrupted_merge(
+        &mut self,
+        repository_id: &str,
+        request: &RequeueMergeAttempt,
+    ) -> Result<MergeAttemptRecord, LprmError> {
+        ensure_object_id(&request.target_before_sha, "target before")?;
+        ensure_object_id(&request.source_sha, "source")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| persistence_error("start merge recovery transaction", error))?;
+        let row = merge_completion_row(&transaction, repository_id, &request.attempt_id)?;
+        if !matches!(
+            row.state.as_str(),
+            "preparing" | "testing" | "integrating" | "reconciling"
+        ) {
+            return Err(LprmError::validation_failed(
+                "Merge attempt is not active for recovery",
+            ));
+        }
+        if row.target_before_sha != request.target_before_sha
+            || row.source_sha != request.source_sha
+        {
+            return Err(LprmError::stale_revision(
+                "Recovery evidence does not match the active attempt",
+            ));
+        }
+        if row.pull_request_status != PullRequestStatus::Merging.as_str() {
+            return Err(LprmError::validation_failed(
+                "Pull request is not merging during recovery",
+            ));
+        }
+        update_requeued_attempt(&transaction, repository_id, request)?;
+        update_requeued_queue(&transaction, &row.queue_id)?;
+        update_requeued_pull_request(&transaction, repository_id, &row.pull_request_id)?;
+        record_merge_requeue_audit(&transaction, repository_id, &row, request)?;
+        transaction
+            .commit()
+            .map_err(|error| persistence_error("commit merge recovery", error))?;
+        self.merge_attempt_record(repository_id, &request.attempt_id)?
+            .ok_or_else(|| LprmError::internal("Recovered merge attempt could not be read"))
+    }
+
     /// Marks an active attempt as requiring Git/database reconciliation.
     ///
     /// # Errors
@@ -1679,7 +1737,7 @@ fn validate_merge_completion(
     row: &MergeCompletionRow,
     request: &CompleteMergeAttempt,
 ) -> Result<(), LprmError> {
-    if row.state != "integrating" {
+    if !matches!(row.state.as_str(), "integrating" | "reconciling") {
         return Err(LprmError::validation_failed(
             "Merge attempt is not ready for completion",
         ));
@@ -1707,7 +1765,7 @@ fn update_completed_attempt(
             "UPDATE merge_attempts \
              SET target_after_sha = ?1, state = 'succeeded', error_code = NULL, \
                  finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-             WHERE repository_id = ?2 AND id = ?3 AND state = 'integrating' \
+             WHERE repository_id = ?2 AND id = ?3 AND state IN ('integrating', 'reconciling') \
                AND target_before_sha = ?4 AND source_sha = ?5 AND candidate_commit_sha = ?6",
             (
                 &request.target_after_sha,
@@ -1802,6 +1860,110 @@ fn record_merge_completion_audit(
             ),
         )
         .map_err(|error| persistence_error("record merge completion audit", error))?;
+    Ok(())
+}
+
+fn update_requeued_attempt(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    request: &RequeueMergeAttempt,
+) -> Result<(), LprmError> {
+    let changed = transaction
+        .execute(
+            "UPDATE merge_attempts \
+             SET state = 'failed', error_code = 'INTERRUPTED_RETRYABLE', \
+                 finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE repository_id = ?1 AND id = ?2 \
+               AND state IN ('preparing', 'testing', 'integrating', 'reconciling') \
+               AND target_before_sha = ?3 AND source_sha = ?4",
+            (
+                repository_id,
+                &request.attempt_id,
+                &request.target_before_sha,
+                &request.source_sha,
+            ),
+        )
+        .map_err(|error| persistence_error("close interrupted merge attempt", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LprmError::stale_revision(
+            "Merge attempt changed before recovery",
+        ))
+    }
+}
+
+fn update_requeued_queue(transaction: &Transaction<'_>, queue_id: &str) -> Result<(), LprmError> {
+    let changed = transaction
+        .execute(
+            "UPDATE merge_queue SET status = 'queued', started_at = NULL, finished_at = NULL \
+             WHERE id = ?1 AND status = 'started'",
+            [queue_id],
+        )
+        .map_err(|error| persistence_error("requeue interrupted merge", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LprmError::internal(
+            "Merge queue entry changed before recovery",
+        ))
+    }
+}
+
+fn update_requeued_pull_request(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    pull_request_id: &str,
+) -> Result<(), LprmError> {
+    let changed = transaction
+        .execute(
+            "UPDATE pull_requests \
+             SET status = 'queued', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE repository_id = ?1 AND id = ?2 AND status = 'merging'",
+            (repository_id, pull_request_id),
+        )
+        .map_err(|error| persistence_error("restore interrupted pull request", error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LprmError::internal(
+            "Pull request changed before merge recovery",
+        ))
+    }
+}
+
+fn record_merge_requeue_audit(
+    transaction: &Transaction<'_>,
+    repository_id: &str,
+    row: &MergeCompletionRow,
+    request: &RequeueMergeAttempt,
+) -> Result<(), LprmError> {
+    let payload = json!({
+        "from": "merging",
+        "to": "queued",
+        "attempt_id": request.attempt_id,
+        "queue_id": row.queue_id,
+        "target_before_sha": request.target_before_sha,
+        "source_sha": request.source_sha,
+        "reason": "interrupted_before_integration",
+    });
+    transaction
+        .execute(
+            "INSERT INTO audit_events(\
+                id, repository_id, pr_id, event_type, actor, payload_json, created_at\
+             ) VALUES (\
+                ?1, ?2, ?3, 'merge_requeued_after_recovery', ?4, ?5, \
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+             )",
+            (
+                &request.audit_id,
+                repository_id,
+                &row.pull_request_id,
+                &request.actor,
+                payload.to_string(),
+            ),
+        )
+        .map_err(|error| persistence_error("record merge requeue audit", error))?;
     Ok(())
 }
 
