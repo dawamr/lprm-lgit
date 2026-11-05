@@ -233,10 +233,10 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T26: Track agent identity and ownership
 
 **Acceptance criteria:**
-- [ ] Worktrees, PR actions, approvals, and audit events consistently record caller identity.
+- [x] Worktrees, PR actions, approvals, and audit events consistently record caller identity.
 
 **Verification:**
-- [ ] Ownership and separation-policy tests pass.
+- [x] Ownership and separation-policy tests pass.
 
 **Dependencies:** T05, T12
 
