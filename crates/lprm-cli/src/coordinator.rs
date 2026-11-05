@@ -7,7 +7,7 @@ use lprm_git::{Git, GuardedMerge, MergeRecovery};
 use lprm_runner::{CheckRunner, CheckSuiteResult};
 use lprm_store::{
     CandidateMergeEvidence, CompleteMergeAttempt, MergeAttemptRecord, RepositoryLock,
-    RequeueMergeAttempt, StartMergeAttempt, StateLayout, Store,
+    RequeueMergeAttempt, StaleQueueInvalidation, StartMergeAttempt, StateLayout, Store,
 };
 use serde::Serialize;
 
@@ -24,6 +24,13 @@ pub struct CoordinatorOptions<'a> {
 pub struct CoordinatorReport {
     pub attempt: MergeAttemptRecord,
     pub checks: CheckSuiteResult,
+}
+
+/// Result of one coordinator pass.
+pub struct RunOutcome {
+    pub attempt: Option<CoordinatorReport>,
+    /// PRs returned to `ready` because `dev` moved after they were validated.
+    pub invalidated: Vec<String>,
 }
 
 pub struct MergeRecoveryOptions<'a> {
@@ -176,11 +183,13 @@ fn reconcile_attempt(
 
 /// Runs at most one queued merge while retaining the repository lock through reconciliation.
 ///
+/// Queue entries validated against an older target head are first returned to `ready`.
+///
 /// # Errors
 ///
 /// Returns a stable busy, Git, validation, stale-revision, or persistence error. Any failure after
 /// an attempt starts leaves it in `reconciling` so another coordinator cannot integrate blindly.
-pub fn run_once(options: &CoordinatorOptions<'_>) -> Result<Option<CoordinatorReport>, LprmError> {
+pub fn run_once(options: &CoordinatorOptions<'_>) -> Result<RunOutcome, LprmError> {
     let runner = CheckRunner::new(options.max_output_bytes)?;
     options.layout.prepare()?;
     let integration_root = options.layout.repository_dir().join("integration");
@@ -198,6 +207,15 @@ pub fn run_once(options: &CoordinatorOptions<'_>) -> Result<Option<CoordinatorRe
     let target_branch = store
         .repository_target(options.layout.repository_id())?
         .ok_or_else(|| LprmError::git_precondition("Repository initialization is missing"))?;
+    let current_target = Git::default().resolve_local_branch(options.repository, &target_branch)?;
+    let invalidated = store.invalidate_stale_queue_entries(
+        options.layout.repository_id(),
+        &StaleQueueInvalidation {
+            current_target_sha: current_target,
+            audit_id_prefix: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+            actor: options.actor.to_owned(),
+        },
+    )?;
     let Some(attempt) = store.start_next_merge_attempt(
         options.layout.repository_id(),
         &StartMergeAttempt {
@@ -207,7 +225,10 @@ pub fn run_once(options: &CoordinatorOptions<'_>) -> Result<Option<CoordinatorRe
         },
     )?
     else {
-        return Ok(None);
+        return Ok(RunOutcome {
+            attempt: None,
+            invalidated,
+        });
     };
 
     let result = run_active_attempt(
@@ -218,7 +239,10 @@ pub fn run_once(options: &CoordinatorOptions<'_>) -> Result<Option<CoordinatorRe
         &integration_root,
         &attempt,
     );
-    result.map(Some)
+    result.map(|report| RunOutcome {
+        attempt: Some(report),
+        invalidated,
+    })
 }
 
 fn run_active_attempt(

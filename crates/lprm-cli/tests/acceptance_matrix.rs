@@ -1,4 +1,4 @@
-//! Offline P0 acceptance matrix (AC-06 and AC-07) driven through the public CLI.
+//! Offline P0 acceptance matrix (AC-06 to AC-09) driven through the public CLI.
 //!
 //! Every test uses an ephemeral repository without a remote, keys, or network.
 
@@ -58,6 +58,17 @@ impl Fixture {
             .args(arguments)
             .output()
             .unwrap()
+    }
+
+    fn status(&self, pr_id: &str) -> String {
+        let shown = self.json_success(&["--json", "pr", "show", pr_id]);
+        shown["data"]["status"].as_str().unwrap().to_owned()
+    }
+
+    fn approve_and_enqueue(&self, pr_id: &str) {
+        assert_success(&self.lprm(&["--json", "pr", "ready", pr_id]));
+        assert_success(&self.lprm(&["--json", "pr", "check", pr_id]));
+        assert_success(&self.lprm(&["--json", "pr", "enqueue", pr_id]));
     }
 
     fn json_success(&self, arguments: &[&str]) -> Value {
@@ -123,6 +134,57 @@ fn ac07_changing_the_source_invalidates_the_validation() {
     assert_eq!(enqueue.status.code(), Some(6), "stale source must exit 6");
     let queue = fixture.json_success(&["--json", "queue", "list"]);
     assert_eq!(queue["data"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn ac09_older_candidate_is_revalidated_against_the_new_target_head() {
+    let fixture = Fixture::new("/usr/bin/true");
+    let first = fixture.submit("first.txt");
+    let second = fixture.submit("second.txt");
+    fixture.approve_and_enqueue(&first.pr_id);
+    fixture.approve_and_enqueue(&second.pr_id);
+
+    let run = fixture.json_success(&["--json", "queue", "run", "--once"]);
+    assert_eq!(run["data"]["processed"], 1);
+    assert_eq!(fixture.status(&first.pr_id), "merged");
+    let target_after_first = git_stdout(&fixture.repository, &["rev-parse", "dev"]);
+
+    // The second PR was validated against the old head: it must be demoted, never merged.
+    let run = fixture.json_success(&["--json", "queue", "run", "--once"]);
+    assert_eq!(run["data"]["processed"], 0);
+    assert_eq!(run["data"]["invalidated"][0], second.pr_id.as_str());
+    assert_eq!(fixture.status(&second.pr_id), "ready");
+    assert_eq!(
+        git_stdout(&fixture.repository, &["rev-parse", "dev"]),
+        target_after_first
+    );
+
+    // Without a new revision the stale evidence cannot be reused.
+    let stale = fixture.lprm(&["--json", "pr", "check", &second.pr_id]);
+    assert_eq!(stale.status.code(), Some(6));
+
+    let synced = fixture.json_success(&["--json", "pr", "sync", &second.pr_id]);
+    assert_eq!(synced["data"]["revisions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        synced["data"]["revisions"][1]["target_sha"],
+        target_after_first.as_str()
+    );
+    let repeated = fixture.lprm(&["--json", "pr", "sync", &second.pr_id]);
+    assert_eq!(repeated.status.code(), Some(5), "unchanged tuple");
+    assert_success(&fixture.lprm(&["--json", "pr", "check", &second.pr_id]));
+    assert_success(&fixture.lprm(&["--json", "pr", "enqueue", &second.pr_id]));
+    let run = fixture.json_success(&["--json", "queue", "run", "--once"]);
+    assert_eq!(run["data"]["processed"], 1);
+    assert_eq!(fixture.status(&second.pr_id), "merged");
+    let target_after_second = git_stdout(&fixture.repository, &["rev-parse", "dev"]);
+    let parents = git_stdout(
+        &fixture.repository,
+        &["rev-list", "--parents", "-n", "1", &target_after_second],
+    );
+    assert_eq!(
+        parents.split_whitespace().nth(1),
+        Some(target_after_first.as_str())
+    );
 }
 
 fn assert_success(output: &Output) {

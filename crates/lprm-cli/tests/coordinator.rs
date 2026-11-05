@@ -53,6 +53,7 @@ fn sequential_pull_requests_merge_once_with_exact_parent_chains() {
         actor: "test-coordinator",
     })
     .expect("first PR should integrate")
+    .attempt
     .expect("first queue item should exist");
     assert_eq!(first.attempt.state, "succeeded");
     let first_target = git_stdout(&repository, &["rev-parse", "dev"]);
@@ -67,7 +68,8 @@ fn sequential_pull_requests_merge_once_with_exact_parent_chains() {
         actor: "test-coordinator",
     })
     .expect("empty queue should be safe");
-    assert!(empty.is_none());
+    assert!(empty.attempt.is_none());
+    assert_eq!(empty.invalidated, Vec::<String>::new());
     assert_eq!(git_stdout(&repository, &["rev-parse", "dev"]), first_target);
 
     let source_two = create_source_commit(&repository, "feature/two", "two.txt", "two");
@@ -91,6 +93,7 @@ fn sequential_pull_requests_merge_once_with_exact_parent_chains() {
         actor: "test-coordinator",
     })
     .expect("second PR should integrate")
+    .attempt
     .expect("second queue item should exist");
     assert_eq!(second.attempt.state, "succeeded");
     let second_target = git_stdout(&repository, &["rev-parse", "dev"]);

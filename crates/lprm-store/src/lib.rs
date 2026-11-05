@@ -192,6 +192,24 @@ pub struct NewPullRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewRevision {
+    pub revision_id: String,
+    pub source_sha: String,
+    pub target_sha: String,
+    pub policy_hash: String,
+    pub check_config_hash: String,
+    pub audit_id: String,
+    pub actor: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaleQueueInvalidation {
+    pub current_target_sha: String,
+    pub audit_id_prefix: String,
+    pub actor: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransitionEvidence {
     pub audit_id: String,
     pub actor: String,
@@ -946,6 +964,203 @@ impl Store {
             PullRequestStatus::Closed,
             evidence,
         )
+    }
+
+    /// Appends an immutable revision for a changed source/target/policy tuple.
+    ///
+    /// Earlier evidence stays untouched but is no longer current: any queued entry is marked
+    /// `stale` and an `approved`/`queued`/failed PR returns to `ready` for revalidation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for malformed IDs, an unchanged tuple, or a PR that is checking,
+    /// merging, or terminal; an internal error when persistence fails.
+    pub fn add_pull_request_revision(
+        &mut self,
+        repository_id: &str,
+        pull_request_id: &str,
+        revision: &NewRevision,
+    ) -> Result<PullRequestRecord, LprmError> {
+        ensure_object_id(&revision.source_sha, "source")?;
+        ensure_object_id(&revision.target_sha, "target")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| persistence_error("start revision transaction", error))?;
+        let status = transaction
+            .query_row(
+                "SELECT status FROM pull_requests WHERE repository_id = ?1 AND id = ?2",
+                (repository_id, pull_request_id),
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| persistence_error("read pull request for revision", error))?
+            .ok_or_else(|| LprmError::invalid_argument("Unknown pull request ID"))?;
+        let current = parse_pull_request_status(&status)?;
+        let next = status_after_new_revision(current)?;
+        let latest = latest_revision_tuple(&transaction, pull_request_id)?;
+        if latest.1
+            == [
+                revision.source_sha.clone(),
+                revision.target_sha.clone(),
+                revision.policy_hash.clone(),
+                revision.check_config_hash.clone(),
+            ]
+        {
+            return Err(LprmError::validation_failed(
+                "Pull request revision is already current",
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO pr_revisions(\
+                    id, pr_id, revision_number, source_sha, target_sha, policy_hash, \
+                    check_config_hash, created_at\
+                 ) VALUES (\
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+                 )",
+                (
+                    &revision.revision_id,
+                    pull_request_id,
+                    latest.0 + 1,
+                    &revision.source_sha,
+                    &revision.target_sha,
+                    &revision.policy_hash,
+                    &revision.check_config_hash,
+                ),
+            )
+            .map_err(|error| persistence_error("create pull request revision", error))?;
+        transaction
+            .execute(
+                "UPDATE merge_queue SET status = 'stale', \
+                    finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE pr_id = ?1 AND status = 'queued'",
+                [pull_request_id],
+            )
+            .map_err(|error| persistence_error("invalidate queued revision", error))?;
+        let changed = transaction
+            .execute(
+                "UPDATE pull_requests \
+                 SET status = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                 WHERE repository_id = ?2 AND id = ?3 AND status = ?4",
+                (
+                    next.as_str(),
+                    repository_id,
+                    pull_request_id,
+                    current.as_str(),
+                ),
+            )
+            .map_err(|error| persistence_error("reset pull request status", error))?;
+        if changed != 1 {
+            return Err(LprmError::internal(
+                "Pull request status changed concurrently",
+            ));
+        }
+        let payload = json!({
+            "reason": "new revision recorded",
+            "from": current.as_str(),
+            "to": next.as_str(),
+            "revision_id": revision.revision_id,
+            "revision_number": latest.0 + 1,
+            "source_sha": revision.source_sha,
+            "target_sha": revision.target_sha,
+            "policy_hash": revision.policy_hash,
+            "check_config_hash": revision.check_config_hash,
+        });
+        insert_audit_event(
+            &transaction,
+            (&revision.audit_id, repository_id, pull_request_id),
+            ("pr_revision_created", &revision.actor, &payload),
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| persistence_error("commit revision transaction", error))?;
+        self.pull_request(repository_id, pull_request_id)?
+            .ok_or_else(|| LprmError::internal("Revised pull request could not be read"))
+    }
+
+    /// Demotes queued entries validated against a different target head back to `ready`.
+    ///
+    /// Callers hold the repository lock. Returns the affected PR IDs in queue order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for a malformed SHA or an internal error on persistence failure.
+    pub fn invalidate_stale_queue_entries(
+        &mut self,
+        repository_id: &str,
+        request: &StaleQueueInvalidation,
+    ) -> Result<Vec<String>, LprmError> {
+        ensure_object_id(&request.current_target_sha, "target")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| persistence_error("start stale queue transaction", error))?;
+        let stale = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT q.id, q.pr_id, r.id, r.target_sha \
+                     FROM merge_queue q \
+                     JOIN pull_requests p ON p.id = q.pr_id \
+                     JOIN pr_revisions r ON r.id = q.revision_id AND r.pr_id = p.id \
+                     WHERE p.repository_id = ?1 AND q.status = 'queued' AND r.target_sha != ?2 \
+                     ORDER BY q.priority DESC, q.enqueued_at, q.id",
+                )
+                .map_err(|error| persistence_error("prepare stale queue query", error))?;
+            statement
+                .query_map((repository_id, &request.current_target_sha), |row| {
+                    Ok([
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ])
+                })
+                .map_err(|error| persistence_error("query stale queue entries", error))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| persistence_error("decode stale queue entries", error))?
+        };
+        let mut invalidated = Vec::new();
+        for [queue_id, pr_id, revision_id, old_target] in stale {
+            transaction
+                .execute(
+                    "UPDATE merge_queue SET status = 'stale', \
+                        finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                     WHERE id = ?1 AND status = 'queued'",
+                    [&queue_id],
+                )
+                .map_err(|error| persistence_error("mark queue entry stale", error))?;
+            transaction
+                .execute(
+                    "UPDATE pull_requests \
+                     SET status = 'ready', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+                     WHERE repository_id = ?1 AND id = ?2 AND status = 'queued'",
+                    (repository_id, &pr_id),
+                )
+                .map_err(|error| persistence_error("return stale pull request to ready", error))?;
+            let payload = json!({
+                "reason": "target branch moved after validation",
+                "from": "queued",
+                "to": "ready",
+                "revision_id": revision_id,
+                "validated_target_sha": old_target,
+                "current_target_sha": request.current_target_sha,
+            });
+            insert_audit_event(
+                &transaction,
+                (
+                    &format!("{}_{queue_id}", request.audit_id_prefix),
+                    repository_id,
+                    &pr_id,
+                ),
+                ("queue_entry_stale", &request.actor, &payload),
+            )?;
+            invalidated.push(pr_id);
+        }
+        transaction
+            .commit()
+            .map_err(|error| persistence_error("commit stale queue transaction", error))?;
+        Ok(invalidated)
     }
 
     /// Changes status and records exact revision evidence in the same transaction.
@@ -1864,6 +2079,71 @@ fn ensure_no_active_merge_attempt(
     } else {
         Ok(())
     }
+}
+
+fn status_after_new_revision(current: PullRequestStatus) -> Result<PullRequestStatus, LprmError> {
+    match current {
+        PullRequestStatus::Draft | PullRequestStatus::Ready => Ok(current),
+        PullRequestStatus::Checking
+        | PullRequestStatus::Merging
+        | PullRequestStatus::Merged
+        | PullRequestStatus::Closed => Err(LprmError::validation_failed(format!(
+            "Pull request in status {} cannot receive a new revision",
+            current.as_str()
+        ))),
+        other => other.transition_to(PullRequestStatus::Ready),
+    }
+}
+
+type RevisionTuple = (i64, [String; 4]);
+
+fn latest_revision_tuple(
+    transaction: &Transaction<'_>,
+    pull_request_id: &str,
+) -> Result<RevisionTuple, LprmError> {
+    transaction
+        .query_row(
+            "SELECT revision_number, source_sha, target_sha, policy_hash, check_config_hash \
+             FROM pr_revisions WHERE pr_id = ?1 ORDER BY revision_number DESC LIMIT 1",
+            [pull_request_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    [
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ],
+                ))
+            },
+        )
+        .map_err(|error| persistence_error("read latest revision", error))
+}
+
+fn insert_audit_event(
+    transaction: &Transaction<'_>,
+    (id, repository_id, pull_request_id): (&str, &str, &str),
+    (event_type, actor, payload): (&str, &str, &Value),
+) -> Result<(), LprmError> {
+    transaction
+        .execute(
+            "INSERT INTO audit_events(\
+                id, repository_id, pr_id, event_type, actor, payload_json, created_at\
+             ) VALUES (\
+                ?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\
+             )",
+            (
+                id,
+                repository_id,
+                pull_request_id,
+                event_type,
+                actor,
+                payload.to_string(),
+            ),
+        )
+        .map_err(|error| persistence_error("record audit event", error))?;
+    Ok(())
 }
 
 fn next_queued_merge(

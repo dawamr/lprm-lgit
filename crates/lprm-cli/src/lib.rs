@@ -116,6 +116,7 @@ pub enum PrCommand {
     Show(IdArgs),
     Diff(PrDiffArgs),
     Ready(IdArgs),
+    Sync(IdArgs),
     Check(IdArgs),
     Review(IdArgs),
     Approve(ReasonArgs),
@@ -252,6 +253,7 @@ struct QueueRunReport {
     mode: &'static str,
     processed: usize,
     attempts: Vec<coordinator::CoordinatorReport>,
+    invalidated: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -337,6 +339,7 @@ fn execute(cli: &Cli) -> Result<Value, LprmError> {
             PrCommand::Show(show) => show_pull_request(&show.id),
             PrCommand::Diff(diff) => diff_pull_request(diff),
             PrCommand::Ready(ready) => mark_pull_request_ready(&ready.id, &actor),
+            PrCommand::Sync(sync) => sync_pull_request(&sync.id, &actor),
             PrCommand::Check(check) => check_pull_request(&check.id, &actor),
             PrCommand::Enqueue(enqueue) => enqueue_pull_request(&enqueue.id, &actor),
             PrCommand::Close(close) => close_pull_request(close, &actor),
@@ -390,6 +393,51 @@ fn require_worktree_owner(
         )));
     }
     Ok(())
+}
+
+fn sync_pull_request(pull_request_id: &str, actor: &AgentIdentity) -> Result<Value, LprmError> {
+    let current_directory = std::env::current_dir()
+        .map_err(|_| LprmError::internal("Current directory is unavailable"))?;
+    let git = lprm_git::Git::default();
+    let repository = git.discover(&current_directory)?;
+    let config = lprm_core::Config::load_for_repository(&repository.worktree_root)?;
+    let (mut store, layout) = open_current_store()?;
+    let current = store
+        .pull_request(layout.repository_id(), pull_request_id)?
+        .ok_or_else(|| {
+            LprmError::invalid_argument(format!("Unknown pull request ID {pull_request_id:?}"))
+        })?;
+    let source_worktree_id = current.worktree_id.as_deref().ok_or_else(|| {
+        LprmError::git_precondition("Pull request has no managed source worktree")
+    })?;
+    let source_worktree = store
+        .worktree(layout.repository_id(), source_worktree_id)?
+        .ok_or_else(|| LprmError::git_precondition("Source worktree registration is missing"))?;
+    let observation = git.observe_worktree(&source_worktree.absolute_path)?;
+    if observation.actual_branch.as_deref() != Some(current.source_branch.as_str())
+        || observation.dirty != Some(false)
+    {
+        return Err(LprmError::git_precondition(
+            "Source worktree must be clean and on the pull request branch",
+        ));
+    }
+    let record = store.add_pull_request_revision(
+        layout.repository_id(),
+        pull_request_id,
+        &lprm_store::NewRevision {
+            revision_id: format!("revision_{}", uuid::Uuid::now_v7().simple()),
+            source_sha: git
+                .resolve_local_branch(&repository.worktree_root, &current.source_branch)?,
+            target_sha: git
+                .resolve_local_branch(&repository.worktree_root, &current.target_branch)?,
+            policy_hash: config.policy_fingerprint()?,
+            check_config_hash: config.check_config_fingerprint()?,
+            audit_id: format!("audit_{}", uuid::Uuid::now_v7().simple()),
+            actor: actor.as_str().to_owned(),
+        },
+    )?;
+    serde_json::to_value(record)
+        .map_err(|_| LprmError::internal("Pull request serialization failed"))
 }
 
 fn mark_pull_request_ready(
@@ -635,8 +683,9 @@ fn run_merge_queue(arguments: &QueueRunArgs, actor: &AgentIdentity) -> Result<Va
     let (_, layout) = open_current_store()?;
     let mode = if arguments.once { "once" } else { "all" };
     let mut attempts = Vec::new();
+    let mut invalidated = Vec::new();
     loop {
-        let result = coordinator::run_once(&coordinator::CoordinatorOptions {
+        let outcome = coordinator::run_once(&coordinator::CoordinatorOptions {
             repository: &repository.worktree_root,
             layout: &layout,
             checks: &config.checks,
@@ -644,7 +693,8 @@ fn run_merge_queue(arguments: &QueueRunArgs, actor: &AgentIdentity) -> Result<Va
             max_output_bytes: 1024 * 1024,
             actor: actor.as_str(),
         })?;
-        let Some(attempt) = result else {
+        invalidated.extend(outcome.invalidated);
+        let Some(attempt) = outcome.attempt else {
             break;
         };
         attempts.push(attempt);
@@ -656,6 +706,7 @@ fn run_merge_queue(arguments: &QueueRunArgs, actor: &AgentIdentity) -> Result<Va
         mode,
         processed: attempts.len(),
         attempts,
+        invalidated,
     })
     .map_err(|_| LprmError::internal("Merge queue run serialization failed"))
 }

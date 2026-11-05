@@ -222,7 +222,7 @@ fn queue_commands_have_stable_empty_machine_reports() {
         );
         assert_eq!(
             document["data"],
-            serde_json::json!({"mode": mode, "processed": 0, "attempts": []})
+            serde_json::json!({"mode": mode, "processed": 0, "attempts": [], "invalidated": []})
         );
     }
 }

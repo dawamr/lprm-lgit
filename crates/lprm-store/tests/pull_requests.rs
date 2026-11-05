@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use lprm_core::{ErrorCode, PullRequestStatus};
 use lprm_store::{
-    CheckRunEvidence, CheckRunStatus, NewPullRequest, RecordCheckSuite, Store, TransitionEvidence,
+    CheckRunEvidence, CheckRunStatus, NewPullRequest, NewRevision, RecordCheckSuite, Store,
+    TransitionEvidence,
 };
 
 fn initialized_store() -> Store {
@@ -268,4 +269,63 @@ fn failing_check_suite_is_persisted_without_approval() {
         store.list_check_runs("revision-1").unwrap()[0].status,
         CheckRunStatus::Failed
     );
+}
+
+fn next_revision(target: &str) -> NewRevision {
+    NewRevision {
+        revision_id: "revision-2".to_owned(),
+        source_sha: "1111111111111111111111111111111111111111".to_owned(),
+        target_sha: target.to_owned(),
+        policy_hash: "policy".to_owned(),
+        check_config_hash: "checks".to_owned(),
+        audit_id: "audit-revision-2".to_owned(),
+        actor: "codex".to_owned(),
+    }
+}
+
+#[test]
+fn new_revision_is_appended_immutably_and_audited() {
+    let mut store = initialized_store();
+    store.create_pull_request(&new_pull_request()).unwrap();
+
+    let unchanged = store
+        .add_pull_request_revision(
+            "repo-1",
+            "pr-1",
+            &next_revision("0000000000000000000000000000000000000000"),
+        )
+        .unwrap_err();
+    assert_eq!(unchanged.code, ErrorCode::ValidationFailed);
+
+    let record = store
+        .add_pull_request_revision(
+            "repo-1",
+            "pr-1",
+            &next_revision("2222222222222222222222222222222222222222"),
+        )
+        .unwrap();
+
+    assert_eq!(record.status, PullRequestStatus::Draft);
+    assert_eq!(record.revisions.len(), 2);
+    assert_eq!(
+        record.revisions[0].target_sha,
+        "0000000000000000000000000000000000000000"
+    );
+    let events = store.audit_events("repo-1", Some("pr-1")).unwrap();
+    assert_eq!(events.last().unwrap().event_type, "pr_revision_created");
+}
+
+#[test]
+fn revision_is_rejected_while_checking() {
+    let mut store = checking_store();
+
+    let error = store
+        .add_pull_request_revision(
+            "repo-1",
+            "pr-1",
+            &next_revision("2222222222222222222222222222222222222222"),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::ValidationFailed);
 }
