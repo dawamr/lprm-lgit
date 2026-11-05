@@ -24,9 +24,11 @@ only through a serialized coordinator. Nothing needs a network, a remote, a daem
 
 ```sh
 cargo build --release --locked
-cp target/release/lprm /usr/local/bin/lprm
+install -m 0755 target/release/lprm /usr/local/bin/lprm
 lprm doctor
 ```
+
+Release archives and checksums are described in [docs/install.md](docs/install.md).
 
 ## Five-minute tour
 
@@ -48,6 +50,7 @@ for every command, and [docs/agent-workflows.md](docs/agent-workflows.md) for He
 
 | Document | Purpose |
 | --- | --- |
+| [docs/install.md](docs/install.md) | Release archives, checksums, building from source |
 | [docs/cli-contract.md](docs/cli-contract.md) | Commands, JSON envelope, exit codes, events |
 | [docs/architecture.md](docs/architecture.md) | Crates, state machine, merge sequence, data model |
 | [docs/threat-model.md](docs/threat-model.md) | Trust boundaries and what LPRM does not protect |

@@ -21,7 +21,11 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "lprm", version, about = "Local Pull Request Manager")]
+#[command(
+    name = "lprm",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("LPRM_BUILD_INFO"), ")"),
+    about = "Local Pull Request Manager"
+)]
 pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,

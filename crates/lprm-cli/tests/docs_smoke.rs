@@ -82,7 +82,12 @@ fn every_documented_command_parses_with_the_real_cli() {
         commands.len()
     );
     for command in commands {
-        if let Err(error) = Cli::try_parse_from(&command) {
+        if let Err(error) = Cli::try_parse_from(&command)
+            && !matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayVersion | clap::error::ErrorKind::DisplayHelp
+            )
+        {
             panic!("documented command does not parse: {command:?}\n{error}");
         }
     }

@@ -364,10 +364,11 @@ Each task inherits the project Definition of Done in `tasks/plan.md`. Dependenci
 ### T31: Package macOS and Linux releases
 
 **Acceptance criteria:**
-- [ ] Reproducible release builds, checksums, version metadata, and installation instructions exist for both targets.
+- [x] Reproducible release builds, checksums, version metadata, and installation instructions exist for both targets (`scripts/package-release.sh`, `docs/install.md`; Linux archives are built by `.github/workflows/release.yml`).
 
 **Verification:**
-- [ ] Clean-machine smoke tests pass on macOS and Linux.
+- [x] Clean-machine smoke test (`scripts/smoke-release.sh`) passes on macOS ARM64.
+- [ ] Linux smoke test: not run locally; runs in CI via `.github/workflows/release.yml` and `ci.yml`.
 
 **Dependencies:** T29, T30, T32
 

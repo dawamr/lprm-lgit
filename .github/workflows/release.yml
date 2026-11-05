@@ -1,0 +1,38 @@
+name: release-artifacts
+
+# Builds, checksums, and smoke-tests archives. It deliberately does not publish a release or
+# create a tag: a human reviews the artifacts and releases them (PRD final checkpoint).
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: sh scripts/package-release.sh ${{ matrix.target }}
+      - run: sh scripts/smoke-release.sh dist/lprm-*-${{ matrix.target }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lprm-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
