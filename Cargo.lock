@@ -385,7 +385,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "lprm-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "lprm-core",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "lprm-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "hex",
  "serde",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "lprm-git"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lprm-core",
  "lprm-runner",
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "lprm-runner"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lprm-core",
  "nix",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "lprm-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "fs2",
  "hex",

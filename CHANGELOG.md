@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Worktree directories and branches are now named `wt-<id>-<slug>`. IDs often start with a digit, which made Pest reject the path as an invalid namespace and fail the test gate. Existing worktrees keep their old names.
+
 ## 0.1.1
 
 - Release archives and the installer now cover Intel Macs (`x86_64-apple-darwin`).
