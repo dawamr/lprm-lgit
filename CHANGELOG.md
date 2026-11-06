@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.1
 
 - Release archives and the installer now cover Intel Macs (`x86_64-apple-darwin`).
+- Weekly and lockfile-triggered `cargo audit` workflow.
 
 ## 0.1.0
 
