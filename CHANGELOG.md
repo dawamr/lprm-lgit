@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3
 
 - `[worktree] setup_commands` run in each new worktree (for example `composer install`), with a timeout and logs; a failure keeps the worktree and returns an error. The report gains `setup`.
 - `[worktree] clone_dependencies` copies dependency directories (nested paths allowed) with a copy-on-write clone, so worktrees are isolated and fast. The report gains `cloned_dependencies`.
