@@ -45,19 +45,40 @@ impl Default for Config {
 }
 
 /// Settings for worktrees created by `lgit worktree create`.
+///
+/// Dependencies are prepared in this order: `clone_dependencies`, `link_dependencies`, then
+/// `setup_commands`. Everything is opt-in; the default is an empty worktree.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeConfig {
+    /// Directories (relative to the repository root, nested paths allowed) copied from the
+    /// source checkout with a copy-on-write clone where the filesystem supports it (APFS, Btrfs,
+    /// XFS). The copy is isolated, so installs in the worktree never touch the source. Missing
+    /// sources are ignored and existing destinations are never replaced.
+    #[serde(default)]
+    pub clone_dependencies: Vec<String>,
     /// Top-level directories whose entries are symlinked from the source checkout into a new
-    /// worktree. Missing directories are ignored; existing paths are never overwritten.
-    #[serde(default = "default_link_dependencies")]
+    /// worktree. Opt-in and discouraged: symlinks share state with the source checkout, and tools
+    /// that resolve `__DIR__` (Composer's `vendor/`) then load code from the source checkout.
+    #[serde(default)]
     pub link_dependencies: Vec<String>,
+    /// Argument-array commands run in order inside the new worktree, for example
+    /// `["composer", "install", "--no-interaction"]`. A failure stops `worktree create` with an
+    /// error; the worktree is kept for inspection.
+    #[serde(default)]
+    pub setup_commands: Vec<Vec<String>>,
+    /// Timeout applied to each setup command.
+    #[serde(default = "default_setup_timeout_seconds")]
+    pub setup_timeout_seconds: u64,
 }
 
 impl Default for WorktreeConfig {
     fn default() -> Self {
         Self {
-            link_dependencies: default_link_dependencies(),
+            clone_dependencies: Vec::new(),
+            link_dependencies: Vec::new(),
+            setup_commands: Vec::new(),
+            setup_timeout_seconds: default_setup_timeout_seconds(),
         }
     }
 }
@@ -68,8 +89,8 @@ impl WorktreeConfig {
     }
 }
 
-fn default_link_dependencies() -> Vec<String> {
-    vec!["vendors".to_owned(), "node_modules".to_owned()]
+const fn default_setup_timeout_seconds() -> u64 {
+    600
 }
 
 /// Opt-in notification hook. Events are advisory: they can never change coordinator decisions.
@@ -234,6 +255,34 @@ impl Config {
                     "worktree.link_dependencies entry {name:?} must be one plain directory name"
                 )));
             }
+        }
+        for name in &self.worktree.clone_dependencies {
+            let path = Path::new(name);
+            let plain = path.components().next().is_some()
+                && path
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)));
+            if !plain {
+                return Err(LprmError::invalid_argument(format!(
+                    "worktree.clone_dependencies entry {name:?} must be a relative path without \
+                     '..' or a leading '/'"
+                )));
+            }
+        }
+        if self.worktree.setup_timeout_seconds == 0 {
+            return Err(LprmError::invalid_argument(
+                "worktree.setup_timeout_seconds must be greater than zero",
+            ));
+        }
+        if self
+            .worktree
+            .setup_commands
+            .iter()
+            .any(|command| command.is_empty() || command.iter().any(String::is_empty))
+        {
+            return Err(LprmError::invalid_argument(
+                "worktree.setup_commands must contain non-empty commands and arguments",
+            ));
         }
         self.validate_review()?;
         self.validate_events()

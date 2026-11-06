@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `[worktree] setup_commands` run in each new worktree (for example `composer install`), with a timeout and logs; a failure keeps the worktree and returns an error. The report gains `setup`.
+- `[worktree] clone_dependencies` copies dependency directories (nested paths allowed) with a copy-on-write clone, so worktrees are isolated and fast. The report gains `cloned_dependencies`.
+- Breaking: `link_dependencies` now defaults to empty. Symlinked `vendor/` makes Composer's autoloader resolve `app/` to the source checkout. Set it explicitly to keep the old behavior.
+
 ## 0.1.2
 
 - Worktree directories and branches are now named `wt-<id>-<slug>`. IDs often start with a digit, which made Pest reject the path as an invalid namespace and fail the test gate. Existing worktrees keep their old names.

@@ -10,10 +10,26 @@ worktree_root = "../.lprm-worktrees"
 require_clean_target = true
 
 [worktree]
-# Entries of these top-level directories in the source checkout are symlinked into every new
-# worktree. A directory that does not exist there is ignored; existing paths are never replaced.
-# Keep them gitignored so the links do not dirty the worktree. Use [] to disable.
-link_dependencies = ["vendors", "node_modules"]
+# Everything here is opt-in; by default a new worktree is an empty checkout.
+# Order of preparation: clone_dependencies, link_dependencies, setup_commands.
+#
+# Copy-on-write clones (APFS, Btrfs, XFS) of dependency directories from the source checkout.
+# Paths are relative to the repository root and may be nested. The copy is isolated, so installs
+# in the worktree never change the source. Missing sources are skipped.
+# clone_dependencies = ["laravel/vendor", "laravel/node_modules"]
+#
+# Commands run in the new worktree, one after another, without a shell. They reconcile the clone
+# with the branch's lockfiles. A failure returns an error and keeps the worktree for inspection.
+# setup_commands = [
+#   ["composer", "install", "--no-interaction"],
+#   ["pnpm", "install", "--frozen-lockfile"],
+# ]
+# setup_timeout_seconds = 600
+#
+# Symlinks are discouraged: they share state with the source checkout, and Composer's vendor/
+# resolves __DIR__ through them, so PHP loads classes from the source checkout. Top-level
+# directories only; keep them gitignored.
+# link_dependencies = ["node_modules"]
 
 [merge]
 strategy = "no-ff"

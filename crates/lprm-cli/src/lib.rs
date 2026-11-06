@@ -214,7 +214,9 @@ struct WorktreeCreateReport {
     path: std::path::PathBuf,
     target_sha: String,
     owner_agent: Option<String>,
+    cloned_dependencies: Vec<std::path::PathBuf>,
     linked_dependencies: Vec<std::path::PathBuf>,
+    setup: Vec<lprm_runner::NamedCheckResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1193,14 +1195,22 @@ fn create_worktree(
         Some(actor.as_str()),
     )?;
 
+    let cloned_dependencies = lprm_core::clone_dependency_directories(
+        &repository.worktree_root,
+        &worktree_path,
+        &config.worktree.clone_dependencies,
+    );
     let linked_dependencies = lprm_core::link_dependency_directories(
         &repository.worktree_root,
         &worktree_path,
         &config.worktree.link_dependencies,
     );
+    let setup = run_setup_commands(&config.worktree, &worktree_path, &layout, spec.id())?;
 
     serde_json::to_value(WorktreeCreateReport {
+        cloned_dependencies,
         linked_dependencies,
+        setup,
         id: spec.id().to_owned(),
         branch: spec.branch().to_owned(),
         path: worktree_path,
@@ -1208,6 +1218,41 @@ fn create_worktree(
         owner_agent: Some(actor.as_str().to_owned()),
     })
     .map_err(|_| LprmError::internal("Worktree report serialization failed"))
+}
+
+/// Runs `[worktree] setup_commands` in the new worktree. A failure keeps the worktree for
+/// inspection and reports where it is and where the logs are.
+fn run_setup_commands(
+    config: &lprm_core::WorktreeConfig,
+    worktree_path: &std::path::Path,
+    layout: &lprm_store::StateLayout,
+    worktree_id: &str,
+) -> Result<Vec<lprm_runner::NamedCheckResult>, LprmError> {
+    if config.setup_commands.is_empty() {
+        return Ok(Vec::new());
+    }
+    let runner = lprm_runner::CheckRunner::new(1024 * 1024)?;
+    let log_directory = layout.logs_dir().join(format!("setup_{worktree_id}"));
+    let timeout = std::time::Duration::from_secs(config.setup_timeout_seconds);
+    let mut results = Vec::new();
+    for (index, command) in config.setup_commands.iter().enumerate() {
+        let name = format!("setup_{}", index + 1);
+        let result = runner.run(&name, command, worktree_path, &log_directory, timeout)?;
+        let passed = result.status == lprm_runner::CheckStatus::Passed;
+        let status = result.status;
+        results.push(lprm_runner::NamedCheckResult { name, result });
+        if !passed {
+            return Err(LprmError::validation_failed(format!(
+                "Worktree setup command {} ({}) ended with status {status:?}. The worktree was \
+                 kept at {}; logs are in {}",
+                index + 1,
+                command.join(" "),
+                worktree_path.display(),
+                log_directory.display(),
+            )));
+        }
+    }
+    Ok(results)
 }
 
 fn initialize_repository(arguments: &InitArgs) -> Result<Value, LprmError> {

@@ -21,7 +21,7 @@ It is not a security boundary against a hostile agent.
 
 - **Same-repository write access.** An agent that can run `git` in the same `.git` directory can move `dev` directly. Protection of the target branch is cooperative. For strong isolation, run the coordinator in a repository the agents cannot write to and have them submit commits to it.
 - **Identity forgery.** `--actor` and `LPRM_ACTOR` are self-declared. Separation of duties is only as strong as your control over who can invoke the CLI as whom.
-- **Malicious check, review, or event commands.** They are trusted configuration from the repository and run with your privileges. Anyone who can change `.lprm.toml` on the target branch can run code. Treat that file like CI configuration and protect it with the same care.
+- **Malicious check, review, event, or worktree setup commands.** They are trusted configuration from the repository and run with your privileges. Anyone who can change `.lprm.toml` on the target branch can run code. Treat that file like CI configuration and protect it with the same care.
 - **Code execution from PR contents.** Running checks on an agent's branch executes the agent's code. A worktree is not a sandbox. Use a container or separate OS user if agents are untrusted.
 - **Git hooks and Git configuration.** Hooks in the repository can execute during merges. LPRM compares the resulting tree and parents with the tested candidate and refuses to record a mismatch, but it does not stop the hook from running.
 - **Secret leakage in logs.** Logs are size-bounded and stored with private permissions. They are not redacted, so do not print secrets from checks.

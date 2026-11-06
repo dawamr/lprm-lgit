@@ -176,6 +176,76 @@ pub fn link_dependency_directories(
     linked
 }
 
+/// Copies selected dependency directories from `source_root` into `worktree` with a
+/// copy-on-write clone (`cp -c` on macOS, `cp --reflink=always` elsewhere).
+///
+/// Entries are relative paths. A missing or symlinked source, an existing destination, a missing
+/// destination parent, or a failed clone is skipped, and a partial copy is removed, because the
+/// configured setup commands can still install what is missing. Returns the cloned destinations.
+#[cfg(unix)]
+pub fn clone_dependency_directories(
+    source_root: &Path,
+    worktree: &Path,
+    names: &[String],
+) -> Vec<PathBuf> {
+    let Ok(source_root) = fs::canonicalize(source_root) else {
+        return Vec::new();
+    };
+    let mut cloned = Vec::new();
+    for name in names {
+        let source = source_root.join(name);
+        let destination = worktree.join(name);
+        let source_is_real_dir =
+            fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_dir());
+        let inside_source = fs::canonicalize(&source).is_ok_and(|resolved| {
+            resolved.starts_with(&source_root) && !resolved.starts_with(worktree)
+        });
+        let parent_ready = destination.parent().is_some_and(Path::is_dir);
+        if !source_is_real_dir
+            || !inside_source
+            || !parent_ready
+            || fs::symlink_metadata(&destination).is_ok()
+        {
+            continue;
+        }
+        if run_clone(&source, &destination) {
+            cloned.push(destination);
+        } else {
+            let _ = fs::remove_dir_all(&destination);
+        }
+    }
+    cloned
+}
+
+#[cfg(unix)]
+fn run_clone(source: &Path, destination: &Path) -> bool {
+    let mut command = std::process::Command::new("cp");
+    if cfg!(target_os = "macos") {
+        command.arg("-c").arg("-R");
+    } else {
+        command.arg("--reflink=always").arg("-R");
+    }
+    command
+        .arg("--")
+        .arg(source)
+        .arg(destination)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Dependency cloning is only supported on Unix-like systems.
+#[cfg(not(unix))]
+pub fn clone_dependency_directories(
+    _source_root: &Path,
+    _worktree: &Path,
+    _names: &[String],
+) -> Vec<PathBuf> {
+    Vec::new()
+}
+
 /// Dependency linking is only supported on Unix-like systems.
 #[cfg(not(unix))]
 pub fn link_dependency_directories(

@@ -70,7 +70,7 @@ lgit recover
 | `init` | Registers the repository and pins the target branch SHA. Idempotent. | repository ID, target |
 | `doctor` | Verifies Git version, `merge-tree --write-tree`, and repository shape. | capabilities |
 | `config show` | Prints the validated effective configuration. | config |
-| `worktree create` | New branch `lprm/<id>-<slug>` and worktree from the exact target SHA; entries of `worktree.link_dependencies` (default `vendors`, `node_modules`) that exist in the source checkout are symlinked in. | `id`, `branch`, `path`, `target_sha`, `linked_dependencies` |
+| `worktree create` | New branch `lprm/wt-<id>-<slug>` and worktree `wt-<id>-<slug>` from the exact target SHA. The `wt-` prefix keeps the directory from starting with a digit, which tools such as Pest reject in namespaces. Opt-in `[worktree]` steps then run in order: `clone_dependencies` (copy-on-write clones), `link_dependencies` (symlinks, discouraged), and `setup_commands`. A failing setup command returns `VALIDATION_FAILED` and keeps the worktree. | `id`, `branch`, `path`, `target_sha`, `cloned_dependencies`, `linked_dependencies`, `setup` |
 | `worktree list` / `status` | Registry merged with live Git state (clean, dirty, missing). | observations |
 | `worktree cleanup` | Dry run by default; `--yes` removes only clean, owned, in-root, fully merged worktrees. | `dry_run`, refusal reasons |
 | `pr create` | Snapshots source and target SHAs as revision 1. Refuses dirty, missing, or empty sources. | `pr_id`, `revisions` |
