@@ -214,6 +214,7 @@ struct WorktreeCreateReport {
     path: std::path::PathBuf,
     target_sha: String,
     owner_agent: Option<String>,
+    linked_dependencies: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1192,7 +1193,14 @@ fn create_worktree(
         Some(actor.as_str()),
     )?;
 
+    let linked_dependencies = lprm_core::link_dependency_directories(
+        &repository.worktree_root,
+        &worktree_path,
+        &config.worktree.link_dependencies,
+    );
+
     serde_json::to_value(WorktreeCreateReport {
+        linked_dependencies,
         id: spec.id().to_owned(),
         branch: spec.branch().to_owned(),
         path: worktree_path,

@@ -9,6 +9,12 @@ target_branch = "dev"
 worktree_root = "../.lprm-worktrees"
 require_clean_target = true
 
+[worktree]
+# Entries of these top-level directories in the source checkout are symlinked into every new
+# worktree. A directory that does not exist there is ignored; existing paths are never replaced.
+# Keep them gitignored so the links do not dirty the worktree. Use [] to disable.
+link_dependencies = ["vendors", "node_modules"]
+
 [merge]
 strategy = "no-ff"
 serialize = true

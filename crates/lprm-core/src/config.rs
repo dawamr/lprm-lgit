@@ -25,6 +25,8 @@ pub struct Config {
     pub policy: PolicyConfig,
     #[serde(default)]
     pub events: EventsConfig,
+    #[serde(default, skip_serializing_if = "WorktreeConfig::is_default")]
+    pub worktree: WorktreeConfig,
 }
 
 impl Default for Config {
@@ -37,8 +39,37 @@ impl Default for Config {
             review: ReviewConfig::default(),
             policy: PolicyConfig::default(),
             events: EventsConfig::default(),
+            worktree: WorktreeConfig::default(),
         }
     }
+}
+
+/// Settings for worktrees created by `lgit worktree create`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeConfig {
+    /// Top-level directories whose entries are symlinked from the source checkout into a new
+    /// worktree. Missing directories are ignored; existing paths are never overwritten.
+    #[serde(default = "default_link_dependencies")]
+    pub link_dependencies: Vec<String>,
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            link_dependencies: default_link_dependencies(),
+        }
+    }
+}
+
+impl WorktreeConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn default_link_dependencies() -> Vec<String> {
+    vec!["vendors".to_owned(), "node_modules".to_owned()]
 }
 
 /// Opt-in notification hook. Events are advisory: they can never change coordinator decisions.
@@ -191,6 +222,16 @@ impl Config {
             if command.is_empty() || command.iter().any(String::is_empty) {
                 return Err(LprmError::invalid_argument(format!(
                     "checks.commands.{name} must contain non-empty arguments"
+                )));
+            }
+        }
+        for name in &self.worktree.link_dependencies {
+            let mut components = Path::new(name).components();
+            let single = matches!(components.next(), Some(std::path::Component::Normal(_)))
+                && components.next().is_none();
+            if !single {
+                return Err(LprmError::invalid_argument(format!(
+                    "worktree.link_dependencies entry {name:?} must be one plain directory name"
                 )));
             }
         }

@@ -22,7 +22,7 @@ pub use review::{
     ApprovalEvidence, Finding, PolicyAssessment, REVIEW_SCHEMA_VERSION, ReviewReport,
     ReviewVerdict, ReviewerIdentity, Severity, assess_policy, glob_match, rules_review,
 };
-pub use worktree::{WorktreeSpec, validate_managed_worktree_path};
+pub use worktree::{WorktreeSpec, link_dependency_directories, validate_managed_worktree_path};
 
 /// The workspace package version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

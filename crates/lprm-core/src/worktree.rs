@@ -123,6 +123,67 @@ fn slugify(task: &str) -> String {
     slug
 }
 
+/// Symlinks the entries of selected dependency directories from `source_root` into `worktree`.
+///
+/// Missing source directories are ignored, existing destination paths are never replaced, and
+/// individual link failures are skipped because dependencies are a convenience, not a gate.
+/// Returns the destination paths that were linked.
+#[cfg(unix)]
+pub fn link_dependency_directories(
+    source_root: &Path,
+    worktree: &Path,
+    names: &[String],
+) -> Vec<PathBuf> {
+    let mut linked = Vec::new();
+    for name in names {
+        let source = source_root.join(name);
+        let Ok(source) = fs::canonicalize(&source) else {
+            continue;
+        };
+        if !source.is_dir() || source.starts_with(worktree) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&source) else {
+            continue;
+        };
+        let destination = worktree.join(name);
+        let created = match fs::symlink_metadata(&destination) {
+            Err(_) => {
+                if fs::create_dir(&destination).is_err() {
+                    continue;
+                }
+                true
+            }
+            Ok(metadata) if metadata.is_dir() => false,
+            Ok(_) => continue,
+        };
+        let before = linked.len();
+        for entry in entries.flatten() {
+            let target = destination.join(entry.file_name());
+            if fs::symlink_metadata(&target).is_ok() {
+                continue;
+            }
+            if std::os::unix::fs::symlink(entry.path(), &target).is_ok() {
+                linked.push(target);
+            }
+        }
+        if created && linked.len() == before {
+            let _ = fs::remove_dir(&destination);
+        }
+    }
+    linked
+}
+
+/// Dependency linking is only supported on Unix-like systems.
+#[cfg(not(unix))]
+pub fn link_dependency_directories(
+    _source_root: &Path,
+    _worktree: &Path,
+    _names: &[String],
+) -> Vec<PathBuf> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
