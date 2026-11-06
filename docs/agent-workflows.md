@@ -1,14 +1,19 @@
-# Agent workflows: Hermes and Codex
+# Agent workflows
 
-Two roles cover the common setup. A **contributor** agent (Codex here) works in its own worktree
-and proposes PRs. A **coordinator** agent (Hermes here) validates, gates, and merges. Use distinct
-`--actor` names: ownership checks, approval separation, and the audit trail depend on them.
+New to LPRM? Read [the mental model](../README.md#the-mental-model-read-this-first) first: `lgit`
+keeps the rules, the agents do the work, and `--actor` is only a label.
+
+Two roles cover the common setup. A **contributor** agent works in its own worktree and proposes
+PRs. A **coordinator** agent validates, gates, and merges. LPRM does not launch or detect any
+agent, and none is required. The names below (Codex as contributor, Hermes as coordinator) are only
+labels passed to `--actor`; [Examples by agent](#examples-by-agent) shows Claude Code and OpenCode
+too, and a human can hold either role. Use distinct `--actor` names: ownership checks, approval separation, and the audit trail depend on them.
 Always pass `--json`, branch on the exit code, and parse `error.code` for recovery decisions.
 
 The runnable version of this page is [examples/agent-workflow.sh](examples/agent-workflow.sh). It
 is executed by the test suite against a temporary repository.
 
-## Codex: from task to PR
+## Contributor (Codex in the examples): from task to PR
 
 ```sh
 lgit --json --actor codex worktree create --task "add feature"
@@ -29,7 +34,7 @@ stages or commits for you. If the PR later needs changes, commit more work and t
 lgit --json --actor codex pr sync <pr-id>
 ```
 
-## Hermes: validate, gate, merge
+## Coordinator (Hermes in the examples): validate, gate, merge
 
 ```sh
 lgit --json --actor hermes pr ready <pr-id>
@@ -47,6 +52,56 @@ lgit --json --actor operator pr approve <pr-id> --reason "reviewed the migration
 
 To queue low-risk PRs automatically, set `policy.auto_enqueue_risks = ["low"]`; `pr check` then
 reports `auto_enqueue` in its response and no separate `enqueue` call is needed.
+
+## Examples by agent
+
+The commands are identical for every agent. Only the identity and the way you hand the agent its
+instructions differ. Pick a stable `--actor` per agent and keep the contributor and the coordinator
+distinct.
+
+### Claude Code
+
+Install the skills once (`~/.claude/skills`), then give the session its identity. In
+`.claude/settings.local.json` (not committed):
+
+```json
+{ "env": { "LPRM_ACTOR": "claude-contrib" } }
+```
+
+Start one session as the contributor and ask it to use the `lprm-contributor` skill. Start a second
+session, or a subagent, with `LPRM_ACTOR=claude-coordinator` and the `lprm-coordinator` skill. A
+short note in `CLAUDE.md` keeps agents on the rails:
+
+```md
+Work only in a worktree from `lgit worktree create`. Open PRs with `lgit pr create`. Never run
+`git merge` or `git push` into the target branch; the coordinator merges with `lgit queue run`.
+```
+
+### OpenCode
+
+OpenCode reads skills from `~/.config/opencode/skills`, and also from `~/.claude/skills` and
+`~/.agents/skills`, so a Claude Code install already works. To install straight into OpenCode:
+
+```sh
+scripts/install-skills.sh --dir ~/.config/opencode/skills
+```
+
+Set the identity in the shell that starts it, one per role:
+
+```sh
+LPRM_ACTOR=opencode-contrib opencode
+LPRM_ACTOR=opencode-coordinator opencode
+```
+
+Put the same short rule as above in your project's agent instructions file (for example
+`AGENTS.md`), and tell the contributor to load `lprm-contributor` and the coordinator to load
+`lprm-coordinator`.
+
+### Mixing agents
+
+Roles are independent of the tool. A common setup is Codex or Claude Code as contributors and
+OpenCode or you as coordinator. Approvals follow the same rule everywhere: the approver must be a
+different identity from the one that created the PR.
 
 ## Decision table for agents
 

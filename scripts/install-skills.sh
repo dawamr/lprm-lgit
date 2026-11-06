@@ -5,7 +5,7 @@
 #   scripts/install-skills.sh --link          # symlink instead of copy, so updates follow the repo
 #   scripts/install-skills.sh --uninstall     # remove the installed LPRM skills
 #   scripts/install-skills.sh --dry-run       # show what would happen
-# Known directories: ~/.claude/skills, ~/.codex/skills, ~/.agents/skills.
+# Known directories: ~/.claude/skills, ~/.codex/skills, ~/.agents/skills, ~/.config/opencode/skills.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -27,7 +27,7 @@ $2"; shift 2 ;;
 done
 
 if [ -z "$DIRS" ]; then
-    for candidate in "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.agents/skills"; do
+    for candidate in "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.agents/skills" "$HOME/.config/opencode/skills"; do
         [ -d "$candidate" ] && DIRS="$DIRS
 $candidate"
     done
