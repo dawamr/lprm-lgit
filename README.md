@@ -5,6 +5,17 @@ without a Git host. Each agent works in an isolated Git worktree, proposes a loc
 deterministic validation and optional review, and merges to the target branch (`dev` by default)
 only through a serialized coordinator. Nothing needs a network, a remote, a daemon, or an API key.
 
+## Quick install
+
+```sh
+curl -fsSL https://github.com/dawamr/lprm-lgit/releases/latest/download/install.sh | sh
+lgit --version
+```
+
+No Rust needed, only Git 2.38 or newer. It installs a checksum-verified binary into `~/.local/bin`
+(macOS ARM64, Linux x86-64, Linux ARM64). Run it again to update. Add `--with-skills` after `sh -s --`
+to also install the agent skills. More options: [docs/install.md](docs/install.md).
+
 ## What you get
 
 - Isolated task worktrees created from the exact SHA of `dev`.
@@ -15,12 +26,83 @@ only through a serialized coordinator. Nothing needs a network, a remote, a daem
 - Recovery after crashes at any point, without duplicate merges.
 - Machine-readable JSON with stable exit codes, so agents never parse prose.
 
+## The mental model (read this first)
+
+`lgit` is a **rule keeper, not a worker and not a manager**. It never starts an agent, never assigns
+a task, and never writes code. It gives whoever does the work a safe place to do it (a worktree) and
+a gate that decides what may reach `dev`.
+
+| | Who or what | Example |
+| --- | --- | --- |
+| Decides which task goes to whom | You, or a lead agent | "Claude Code does login, Codex does the cache" |
+| Does the work and writes code | The agent (its own compute and model) | Claude Code editing files in its worktree |
+| Keeps work apart, checks it, orders merges, records it | `lgit` | `worktree create`, `pr check`, `queue run`, `audit` |
+| A name on the record, such as `--actor codex` | A plain label, not a login and not a process | Shows who owns a worktree and who approved |
+
+### A concrete example
+
+You want two features, login and a cache, built in parallel. You open two terminals, one with
+Claude Code and one with Codex, and a third for yourself as the coordinator.
+
+```sh
+# Terminal 1, Claude Code was told: "build login using lgit"
+lgit --actor claude worktree create --task "login"
+# ...Claude edits and commits inside the printed path...
+lgit --actor claude pr create --from <branch> --title "Add login"
+
+# Terminal 2, Codex was told: "build the cache using lgit"
+lgit --actor codex worktree create --task "cache"
+lgit --actor codex pr create --from <branch> --title "Add cache"
+
+# Terminal 3, you as the coordinator: check each PR, then merge them one at a time
+lgit --actor operator pr ready <pr-id>
+lgit --actor operator pr check <pr-id>
+lgit --actor operator pr enqueue <pr-id>
+lgit --actor operator queue run --all
+```
+
+What happened: `lgit` created two separate worktrees, so the agents could not overwrite each other.
+It recorded that `claude` owns the login worktree and `codex` owns the cache one. It tested each PR
+on its exact commits, then merged them one after another, re-testing the second against the result
+of the first. The labels `claude`, `codex`, and `operator` did nothing except appear in the record.
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant A as Agent: Claude Code
+    participant B as Agent: Codex
+    participant L as lgit
+    participant G as Git repository
+    You->>A: "Build login" (you choose the task)
+    You->>B: "Build the cache"
+    A->>L: worktree create (actor claude)
+    L->>G: new branch and worktree
+    B->>L: worktree create (actor codex)
+    L->>G: another branch and worktree
+    A->>G: edit and commit in its worktree
+    B->>G: edit and commit in its worktree
+    A->>L: pr create
+    B->>L: pr create
+    You->>L: pr check, pr enqueue, queue run (actor operator)
+    L->>G: test the merged result, then merge one by one
+```
+
+Things `lgit` does **not** do: launch Claude Code or Codex, split a big goal into tasks, decide which
+agent is better, or prove that `--actor codex` was really Codex. If you want something that
+dispatches tasks automatically, that is a separate orchestrator layer on top (a lead agent or a
+script) that calls the same `lgit` commands.
+
 ## Requirements
 
-- macOS or Linux, Git 2.38 or newer (needs `git merge-tree --write-tree`), Rust 1.89 or newer.
-- SQLite is bundled.
+- macOS or Linux, Git 2.38 or newer (needs `git merge-tree --write-tree`).
+- Rust 1.89 or newer only if you build from source. SQLite is bundled.
 
-## Build
+## Install
+
+See [Quick install](#quick-install) above. Options, checksums, and release archives are in
+[docs/install.md](docs/install.md).
+
+## Build from source
 
 ```sh
 cargo build --release --locked
@@ -44,7 +126,7 @@ lgit --actor merger queue run --once
 ```
 
 Add `--json` to any command for the stable machine envelope. See [docs/cli-contract.md](docs/cli-contract.md)
-for every command, and [docs/agent-workflows.md](docs/agent-workflows.md) for Hermes and Codex flows.
+for every command, and [docs/agent-workflows.md](docs/agent-workflows.md) for agent flows (Codex, Hermes, Claude Code, OpenCode, or a human).
 
 ## How it compares
 
@@ -148,7 +230,7 @@ flowchart TD
 | [docs/architecture.md](docs/architecture.md) | Crates, state machine, merge sequence, data model |
 | [docs/threat-model.md](docs/threat-model.md) | Trust boundaries and what LPRM does not protect |
 | [docs/runbook.md](docs/runbook.md) | Operating, recovering, and troubleshooting |
-| [docs/agent-workflows.md](docs/agent-workflows.md) | End-to-end Hermes and Codex examples |
+| [docs/agent-workflows.md](docs/agent-workflows.md) | End-to-end agent examples: Codex, Hermes, Claude Code, OpenCode |
 | [docs/skills.md](docs/skills.md) | Installable agent skills (`scripts/install-skills.sh`) |
 | [docs/examples/lprm.sample.toml](docs/examples/lprm.sample.toml) | Annotated sample configuration |
 | [docs/adr](docs/adr) | Architecture decisions |
