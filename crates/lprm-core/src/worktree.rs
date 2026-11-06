@@ -35,7 +35,9 @@ impl WorktreeSpec {
 
         let id = Uuid::now_v7().simple().to_string();
         let short_id = id[..8].to_owned();
-        let directory_name = format!("{short_id}-{slug}");
+        // The `wt-` prefix keeps the directory name from starting with a digit. Tools such as
+        // Pest derive PHP namespaces from absolute paths and reject digit-leading segments.
+        let directory_name = format!("wt-{short_id}-{slug}");
         let branch = format!("lprm/{directory_name}");
         Ok(Self {
             id,
@@ -207,6 +209,20 @@ mod tests {
         assert!(first.branch().starts_with("lprm/"));
         assert!(first.branch().ends_with("-add-user-roles"));
         assert!(!first.directory_name().contains('/'));
+        assert!(first.directory_name().starts_with("wt-"));
+    }
+
+    #[test]
+    fn directory_name_never_starts_with_a_digit() {
+        for _ in 0..200 {
+            let spec = WorktreeSpec::new("Add user roles").expect("task should be valid");
+            let first = spec
+                .directory_name()
+                .chars()
+                .next()
+                .expect("name is not empty");
+            assert!(first.is_ascii_alphabetic(), "{}", spec.directory_name());
+        }
     }
 
     #[test]
