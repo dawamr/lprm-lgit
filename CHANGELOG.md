@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Release archives and the installer now cover Intel Macs (`x86_64-apple-darwin`).
+
 ## 0.1.0
 
 First release.

@@ -1,0 +1,23 @@
+name: audit
+
+# Advisory scan of Cargo.lock. Runs weekly because new advisories appear without any code change.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+  push:
+    paths: ["Cargo.lock", ".github/workflows/audit.yml"]
+  pull_request:
+    paths: ["Cargo.lock"]
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit

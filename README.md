@@ -13,7 +13,7 @@ lgit --version
 ```
 
 No Rust needed, only Git 2.38 or newer. It installs a checksum-verified binary into `~/.local/bin`
-(macOS ARM64, Linux x86-64, Linux ARM64). Run it again to update. Add `--with-skills` after `sh -s --`
+(macOS ARM64 and Intel, Linux x86-64, Linux ARM64). Run it again to update. Add `--with-skills` after `sh -s --`
 to also install the agent skills. More options: [docs/install.md](docs/install.md).
 
 ## What you get

@@ -28,12 +28,13 @@ sh install.sh --uninstall
 
 To update, run it again: it replaces the binary when a newer release exists and does nothing when
 you are current (`--force` reinstalls). Prefer to read the script first? Download `install.sh`
-from the release page and run it locally. Intel Macs and Windows have no prebuilt binary yet.
+from the release page and run it locally. Windows has no prebuilt binary yet.
 
 ## From a release archive
 
 Archives are named `lgit-<version>-<target>.tar.gz`, with a matching `.sha256` file. Targets are
-`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu`.
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
+`aarch64-unknown-linux-gnu`.
 
 ```sh
 shasum -a 256 -c lgit-0.1.0-aarch64-apple-darwin.tar.gz.sha256
