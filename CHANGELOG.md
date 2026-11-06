@@ -9,6 +9,7 @@ First release.
 - Durable merge queue with a repository lock, stale-evidence demotion, and crash recovery.
 - `pr sync`, `pr review`, `pr approve`, protected-path risk, an external reviewer adapter, and opt-in automatic admission.
 - Opt-in, bounded agent events.
+- `scripts/install.sh` installs or updates `lgit` from a release with checksum verification; the release workflow attaches archives and the installer to a draft release.
 - `worktree create` symlinks `vendors/*` and `node_modules/*` from the source checkout when present (`[worktree] link_dependencies`).
 - Stable JSON envelope and exit codes 0 and 2 to 8.
 - Installable agent skills (`lprm-contributor`, `lprm-coordinator`, `lprm-recovery`) and `scripts/install-skills.sh`.

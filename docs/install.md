@@ -6,6 +6,30 @@
 - Git 2.38 or newer (`git --version`). LPRM needs `git merge-tree --write-tree`.
 - No other runtime dependencies. SQLite is built in.
 
+## Quick install (no Rust needed)
+
+The release binaries are prebuilt and statically include SQLite, so you only need Git 2.38 or
+newer at runtime. Rust is needed only to build from source.
+
+```sh
+curl -fsSL https://github.com/dawamr/lprm-lgit/releases/latest/download/install.sh | sh
+```
+
+The installer detects macOS ARM64, Linux x86-64, or Linux ARM64, downloads the matching archive,
+verifies its SHA-256 checksum, and installs `lgit` into `~/.local/bin` atomically. Options:
+
+```sh
+sh install.sh --version v0.1.0     # a specific release
+sh install.sh --bin-dir /usr/local/bin
+sh install.sh --with-skills        # also copy the agent skills into known agent directories
+sh install.sh --dry-run            # show what would happen
+sh install.sh --uninstall
+```
+
+To update, run it again: it replaces the binary when a newer release exists and does nothing when
+you are current (`--force` reinstalls). Prefer to read the script first? Download `install.sh`
+from the release page and run it locally. Intel Macs and Windows have no prebuilt binary yet.
+
 ## From a release archive
 
 Archives are named `lgit-<version>-<target>.tar.gz`, with a matching `.sha256` file. Targets are
