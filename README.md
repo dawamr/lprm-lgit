@@ -46,6 +46,99 @@ lgit --actor merger queue run --once
 Add `--json` to any command for the stable machine envelope. See [docs/cli-contract.md](docs/cli-contract.md)
 for every command, and [docs/agent-workflows.md](docs/agent-workflows.md) for Hermes and Codex flows.
 
+## How it compares
+
+These tools work at different layers, so the table is about fit, not a ranking. Git is the storage and history layer. Pando and Scion are server-side source control that OpenAI and Anthropic built for their own monorepos and the volume of agent changes they produce. LPRM (`lgit`) is a small local workflow on top of ordinary Git for one machine.
+
+| | Plain Git | Pando (OpenAI) | Scion (Anthropic) | LPRM (`lgit`) |
+| --- | --- | --- | --- | --- |
+| What it is | Distributed version control | Rebuilt Git server backend for OpenAI's monorepo | In-house version control system for Anthropic's monorepo | Local PR, check, and merge-queue workflow over Git |
+| Git compatibility | Native | Keeps the Git client and protocol; replaces the server | Diverges from Git's model and protocols | Uses stock Git; no custom server or format |
+| Where the work happens | Local clone | Server side, behind a Git front end | Server side; commits, merges, and rebases are made on the server and no push step is needed | Local worktrees, one SQLite state directory per repository |
+| Agent isolation | Manual (`git worktree`, branches) | Aimed at many agents pushing to one shared repository | Clients are always-online agents and jobs, often with no local repository | One managed worktree and branch per task, with an owner |
+| Review and merge gating | None; relies on a host or process | Not described as part of it | Not included; code review, search, and CI are separate systems | Immutable PR revisions, required checks, risk policy, approvals, and a serialized merge queue with candidate-tree checks |
+| Audit trail | Reflog and commit history | Not described | Not described | Append-only audit journal with actor attribution |
+| Scale target | Single repository | Reported around 1 PB of Git data a day, with lower push latency | Tens of thousands of merged changes a day | A handful of agents on one machine |
+| Availability | Open source | Internal to OpenAI; not available to run | Internal to Anthropic; no public release announced | Open source in this repository |
+
+What this means in practice:
+
+- LPRM does not replace Git, and it does not try to scale a monorepo. It adds the missing local gate: nothing reaches the target branch until its exact revision has passed checks on the merged result.
+- Pando and Scion address a different bottleneck, which is server throughput and checkout cost at very large scale. You can't adopt either one today, and a single machine with a few agents is unlikely to need them.
+- Plain Git on its own is enough for one person. LPRM starts to pay off when several agents or sessions change the same repository and you want evidence-based merges and recovery after a crash.
+
+The Pando and Scion rows summarize public write-ups of internal systems, not hands-on use. See OpenAI's [Scaling Git at OpenAI](https://openai.com/index/scaling-git-at-openai/) and Anthropic's [Redesigning source control at Anthropic](https://www.anthropic.com/research/redesigning-source-control). Where a cell says "not described", the sources do not cover it, which is not the same as the feature being absent.
+
+### Workflow comparison
+
+Three ways to get a change into the target branch. The table is about where the safety comes from, and the diagrams show the path a change takes.
+
+| | One person with Git | Agents without LPRM | Agents with LPRM |
+| --- | --- | --- | --- |
+| Who changes the repository | One person, one change at a time | Several agents or sessions at once | Several agents, each in its own managed worktree |
+| Isolation | The person's own working copy | Often a shared checkout or hand-made branches | One worktree and branch per task, with an owner |
+| What gets validated | Whatever the person ran locally | Whatever each agent chose to run | Required checks against an exact source SHA and target SHA |
+| After the target moves | The person notices and rebases | Easily missed; the old result is trusted | Queued work is demoted to `ready`; `pr sync` creates a fresh revision |
+| What gets tested before merge | The branch on its own | The branch on its own | The merged candidate tree, in a disposable worktree |
+| Review and approval | Self review or a hosted PR | Ad hoc, or none | Risk policy, required reviews, approvals by a different identity |
+| Merge | A manual `git merge` or a button on a host | Whoever finishes first, possibly in parallel | One serialized queue under a repository lock |
+| After a crash | The person inspects it | Often unclear what state was left | Recovery classifies attempts from Git evidence and never merges twice |
+| Record of what happened | Commit history and reflog | Scattered chat and logs | Append-only audit journal with actor names |
+| Cost | Lowest | Low until agents collide | Setup, `lgit` commands, and check time |
+
+For one person, the first column is enough. LPRM's value shows up in the third column, when parallel agents make "what was actually tested" and "who merged what" hard to answer.
+
+**One person with Git**
+
+```mermaid
+flowchart LR
+    A["Create branch"] --> B["Edit and commit"]
+    B --> C["Run tests locally"]
+    C --> D{"Passed?"}
+    D -- "no" --> B
+    D -- "yes" --> E["Merge or open hosted PR"]
+    E --> F["Target branch"]
+```
+
+**Agents without LPRM**
+
+```mermaid
+flowchart LR
+    A1["Agent A edits"] --> S["Shared checkout or ad hoc branches"]
+    A2["Agent B edits"] --> S
+    A3["Agent C edits"] --> S
+    S --> T["Each agent runs its own checks"]
+    T --> M["Manual or racing merges"]
+    M --> R{"Target moved meanwhile?"}
+    R -- "unnoticed" --> X["Untested combination reaches target"]
+    R -- "noticed" --> H["Human rebases and retests"]
+    H --> M
+```
+
+**Agents with LPRM**
+
+```mermaid
+flowchart TD
+    W["worktree create: isolated branch per task"] --> C["Agent commits"]
+    C --> P["pr create and pr ready"]
+    P --> K["pr check: required checks on exact SHAs"]
+    K --> V{"Passed?"}
+    V -- "no" --> C
+    V -- "yes" --> G{"Risk policy needs review or approval?"}
+    G -- "yes" --> A["pr review and pr approve by a different identity"]
+    G -- "no" --> E["pr enqueue"]
+    A --> E
+    E --> Q["queue run: repository lock, one at a time"]
+    Q --> D{"Target or source moved?"}
+    D -- "yes" --> S["Demoted to ready; pr sync makes a new revision"]
+    S --> K
+    D -- "no" --> N["Build candidate tree in a disposable worktree"]
+    N --> Z{"Combined checks pass?"}
+    Z -- "no" --> F["Failed; target untouched"]
+    Z -- "yes" --> Y["Guarded no-ff merge"]
+    Y --> O["Merged and audited"]
+```
+
 ## Documentation
 
 | Document | Purpose |
